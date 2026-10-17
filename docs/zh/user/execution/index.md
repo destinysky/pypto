@@ -8,6 +8,7 @@
 | ---- | ---- |
 | [编译](00-compile.md) | `ir.compile` 及其参数、`JITFunction.compile`、产物目录、pass dump |
 | [运行](01-run.md) | `CompiledProgram` 的契约、`ChipWorker`、`DeviceTensor`，以及影响派发的 `RunConfig` 字段 |
+| [算子恢复](02-operator-recovery.md) | 本机 A5 SDMA 自动重执行、安全契约及支持的图 |
 
 ## PyPTO 到哪里为止
 

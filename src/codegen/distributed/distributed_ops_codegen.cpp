@@ -217,6 +217,8 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
   codegen.Emit(cfg_var + " = CallConfig()");
   codegen.Emit(cfg_var + ".aicpu_thread_num = config.aicpu_thread_num");
   codegen.Emit("_keep.append(" + ta_var + ")");
+  codegen.Emit("if _get_recovery(orch) is not None:");
+  codegen.Emit("    raise ValueError('host builtin collectives must be wrapped in a chip function for recovery')");
   codegen.Emit("orch.submit_next_level(callables[\"" + variant + "\"], " + ta_var + ", " + cfg_var +
                ", worker=" + rank_expr + ")");
 }

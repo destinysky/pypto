@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -95,6 +96,27 @@ IRPropertySet Pass::GetInvalidatedProperties() const {
 // Utility pass implementations
 
 namespace {
+
+// Backend-dependent passes also need a context when the caller uses the
+// pipeline directly. Preserve the existing context-free verification and
+// diagnostic defaults, and restore the context stack on every exit path.
+class DefaultPassContextScope {
+ public:
+  DefaultPassContextScope() {
+    if (PassContext::Current() == nullptr) {
+      context_.emplace(std::vector<PassInstrumentPtr>{}, GetDefaultVerificationLevel(),
+                       GetDefaultDiagnosticPhase(), DiagnosticCheckSet{});
+      context_->EnterContext();
+    }
+  }
+
+  ~DefaultPassContextScope() {
+    if (context_) context_->ExitContext();
+  }
+
+ private:
+  std::optional<PassContext> context_;
+};
 
 /**
  * @brief Pass implementation that wraps a program transform function
@@ -218,6 +240,7 @@ void PassPipeline::AddPass(Pass pass) { passes_.push_back(std::move(pass)); }
 ProgramPtr PassPipeline::Run(const ProgramPtr& program) const {
   INTERNAL_CHECK(program) << "PassPipeline cannot run on null program";
 
+  DefaultPassContextScope default_context;
   ProgramPtr current = program;
 
   // Automatic verification: verify lightweight properties exactly once each.

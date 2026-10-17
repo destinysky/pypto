@@ -34,6 +34,7 @@ import numpy as np  # pyright: ignore[reportMissingImports]
 import torch
 
 from .device_tensor import DeviceTensor, StackedDeviceTensor
+from .operator_recovery import OperatorRecoveryConfig, _get_recovery, _RecoveryGraph
 from .runtime_base import Worker
 
 logger = logging.getLogger(__name__)
@@ -532,6 +533,7 @@ def _construct_worker(
     num_sub: int,
     enable_sdma: bool = False,
     startup_timeout_s: float | None = None,
+    operator_recovery: OperatorRecoveryConfig | None = None,
 ) -> Any:
     """Construct a simpler ``Worker(level=3)`` from the distributed config."""
     if startup_timeout_s is not None and (not math.isfinite(startup_timeout_s) or startup_timeout_s <= 0):
@@ -554,6 +556,8 @@ def _construct_worker(
     }
     if startup_timeout_s is not None:
         worker_config["startup_timeout_s"] = startup_timeout_s
+    if operator_recovery is not None:
+        worker_config.update(operator_recovery.worker_options())
     return Worker(**worker_config)
 
 
@@ -938,7 +942,15 @@ def _record_dispatch_program(orch: Any, callable_id: Any, disp_dir: Path) -> Non
         )
 
 
-def _submit_chip(orch: Any, callable_id: Any, task_args: Any, config: Any, worker: int | None) -> Any:
+def _submit_chip(
+    orch: Any,
+    callable_id: Any,
+    task_args: Any,
+    config: Any,
+    worker: int | None,
+    *,
+    recovery_name: str | None = None,
+) -> Any:
     """``orch.submit_next_level`` that stamps each dispatch's DFX directory.
 
     The runtime path helpers root every diagnostic artifact at a fixed filename
@@ -969,6 +981,11 @@ def _submit_chip(orch: Any, callable_id: Any, task_args: Any, config: Any, worke
     :func:`_resolve_chip_worker`. Resolution happens before the DFX namespacing
     so the artifacts land under the chip that actually ran the dispatch.
     """
+    capture = _get_recovery(orch)
+    if capture is not None:
+        if worker is None:
+            raise ValueError("operator recovery requires an explicit rank on every chip dispatch")
+        return capture.submit(callable_id, task_args, config, worker, recovery_name)
     worker = _resolve_chip_worker(orch, worker)
     base = config.output_prefix
     if not base:
@@ -1426,6 +1443,7 @@ def _make_dispatch_orchestration(
     call_config: Any,
     device_nums: int,
     keepalive: list[Any],
+    operator_recovery: OperatorRecoveryConfig | None = None,
 ) -> Callable[..., None]:
     """Build one orchestration closure over a handle-owned metadata frame."""
     # ``world_size`` is the only worker-level scalar the entry needs; codegen
@@ -1448,16 +1466,31 @@ def _make_dispatch_orchestration(
         # across the swimlane two-pass, exactly like the DFX counter above.
         orch._pypto_chip_count = device_nums
         orch._pypto_commless_seq = 0
-        entry_fn(
-            orch,
-            _unused_args,
-            call_config,
-            tensors=tensors,
-            callables=chip_cids,
-            sub_ids=sub_ids,
-            _keep=keepalive,
-            world_size=device_nums,
+        capture = (
+            _RecoveryGraph(operator_recovery, device_nums, chip_cids)
+            if operator_recovery is not None
+            else None
         )
+        if capture is not None:
+            orch.defer_dispatch_until_submitted()
+            orch._pypto_recovery = capture
+        try:
+            entry_fn(
+                orch,
+                _unused_args,
+                call_config,
+                tensors=tensors,
+                callables=chip_cids,
+                sub_ids=sub_ids,
+                _keep=keepalive,
+                world_size=device_nums,
+            )
+            if capture is not None:
+                capture.flush(orch)
+                keepalive.append(capture)
+        finally:
+            if capture is not None:
+                orch._pypto_recovery = None
 
     return orch_fn
 
@@ -1471,6 +1504,7 @@ def _submit_dispatch(
     call_config: Any,
     device_nums: int,
     keepalive: list[Any],
+    operator_recovery: OperatorRecoveryConfig | None = None,
 ) -> Any:
     """Submit one orchestration closure and return Simpler's run handle."""
     orch_fn = _make_dispatch_orchestration(
@@ -1481,6 +1515,7 @@ def _submit_dispatch(
         call_config,
         device_nums,
         keepalive,
+        operator_recovery,
     )
     return w.submit(orch_fn)
 
@@ -1826,7 +1861,7 @@ class DistributedWorker(Worker):
 
     __test__ = False
 
-    def __init__(
+    def __init__(  # noqa: PLR0912 -- validate opt-in recovery alongside prepared-worker setup
         self,
         compiled: DistributedCompiledProgram | Sequence[DistributedCompiledProgram],
         config: RunConfig | None = None,
@@ -1837,8 +1872,14 @@ class DistributedWorker(Worker):
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
         inherited_host_tensors: Sequence[torch.Tensor | ReadOnlyHostTensor] | None = None,
         startup_timeout_s: float | None = None,
+        operator_recovery: OperatorRecoveryConfig | None = None,
     ) -> None:
         super().__init__()  # initialize Worker ABC state (_owned_tensors)
+        if operator_recovery is not None and not isinstance(operator_recovery, OperatorRecoveryConfig):
+            raise TypeError("operator_recovery must be an OperatorRecoveryConfig or None")
+        if operator_recovery is not None and (persistent or callbacks or sub_worker_overrides):
+            raise ValueError("operator recovery requires run-scoped domains and no host callbacks")
+        self._operator_recovery = operator_recovery
         # Simpler owns allocations as Buffer objects. PyPTO continues exposing
         # raw pointers from its public memory API and resolves them through this
         # table at every control-plane operation. The retained handle is also
@@ -1889,6 +1930,12 @@ class DistributedWorker(Worker):
             raise ValueError("DistributedWorker requires at least one compiled program")
 
         primary = programs[0]
+        if operator_recovery is not None and (
+            len(programs) != 1
+            or primary.platform != "a5"
+            or primary._distributed_config.runtime != "tensormap_and_ringbuffer"
+        ):
+            raise ValueError("operator recovery requires one local A5 tensormap_and_ringbuffer program")
         self.dc = primary._distributed_config
         self._compiled = primary  # primary program: dispatched by ``rt(*args)``
         # In multi-program mode ``rt(*args)`` is ambiguous (which program?), so it
@@ -1930,6 +1977,8 @@ class DistributedWorker(Worker):
                 enable_sdma = enable_sdma or prog_enable_sdma
                 entry_fn, alloc_fn = _load_orch_entry(prog.output_dir)
                 loaded_subs = _load_sub_worker_fns(prog.output_dir)
+                if operator_recovery is not None and loaded_subs:
+                    raise ValueError("operator recovery does not support host sub-worker tasks")
                 prog_callbacks = {name: fn for name, fn in callbacks.items() if name in loaded_subs}
                 consumed |= set(prog_callbacks)
                 sub_worker_fns = _bind_sub_workers(
@@ -1976,6 +2025,7 @@ class DistributedWorker(Worker):
                 num_sub,
                 enable_sdma=enable_sdma,
                 startup_timeout_s=startup_timeout_s,
+                **({"operator_recovery": operator_recovery} if operator_recovery is not None else {}),
             )
             from .tensor_arg import bind_tensor_arg_owner  # noqa: PLC0415
 
@@ -2401,6 +2451,11 @@ class DistributedWorker(Worker):
             call_config,
             state["device_nums"],
             keepalive,
+            **(
+                {"operator_recovery": self._operator_recovery}
+                if getattr(self, "_operator_recovery", None) is not None
+                else {}
+            ),
         )
 
     def _submit_native_dispatch(

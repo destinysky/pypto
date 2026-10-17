@@ -56,6 +56,7 @@ _META_SCHEMA = 3
 if TYPE_CHECKING:
     from pypto.runtime._artifact_runtime import ArtifactRuntime
     from pypto.runtime.distributed_runner import DistributedWorker, ReadOnlyHostTensor
+    from pypto.runtime.operator_recovery import OperatorRecoveryConfig
     from pypto.runtime.runner import RunConfig
 
 
@@ -497,6 +498,7 @@ class DistributedCompiledProgram:
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
         inherited_host_tensors: "Sequence[torch.Tensor | ReadOnlyHostTensor] | None" = None,
         startup_timeout_s: float | None = None,
+        operator_recovery: "OperatorRecoveryConfig | None" = None,
     ) -> "DistributedWorker":
         """Prepare a reusable L3 execution handle (setup once, dispatch many).
 
@@ -566,6 +568,10 @@ class DistributedCompiledProgram:
                 :class:`~pypto.runtime.ReadOnlyHostTensor` when the backing is
                 shared but not writable, which makes ``copy_from`` into it raise
                 instead of faulting in the forked child.
+            operator_recovery: Opt-in local A5 SDMA recovery contract. Names
+                replay-safe chip functions; groups matching rank submissions
+                and delegates failure handling to Simpler. Requires transient
+                domains and no host callbacks. Defaults to disabled.
             startup_timeout_s: Optional positive finite bound, in seconds, for
                 the forked worker hierarchy to report startup readiness. ``None``
                 keeps Simpler's default timeout.
@@ -585,6 +591,7 @@ class DistributedCompiledProgram:
             sub_worker_overrides=sub_worker_overrides,
             inherited_host_tensors=inherited_host_tensors,
             startup_timeout_s=startup_timeout_s,
+            **({"operator_recovery": operator_recovery} if operator_recovery is not None else {}),
         )
 
     @staticmethod

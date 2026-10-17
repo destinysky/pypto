@@ -48,6 +48,7 @@ from typing import Any, cast
 
 from pypto._external_source import EXTERNAL_INCLUDE_DIRS_ATTR, encode_external_include_dirs
 from pypto._function_attrs import DUAL_AIV_DISPATCH_ATTR
+from pypto.language.distributed.typing.comm_ctx import CommCtx as _LangCommCtx
 from pypto.language.typing.array import Array as _LangArray
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import TensorLayout
@@ -2098,6 +2099,9 @@ class Specializer:
                 continue
             if isinstance(ann_obj, _LangArray) and ann_obj.extent is not None and ann_obj.dtype is not None:
                 array_param_anns[arg.arg] = f"pl.Array[{ann_obj.extent}, {_array_dtype_str(ann_obj.dtype)}]"
+            elif ann_obj is _LangCommCtx:
+                array_param_anns[arg.arg] = "pld.CommCtx"
+                self._needs_pld_import = True
 
         params = self._build_params(
             all_param_names,
@@ -2115,6 +2119,10 @@ class Specializer:
         ret_type = _infer_return_type(
             func_def, ctx.tensor_meta, out_params, distributed_params, ctx.py_globals
         )
+        # A signature-only external kernel has no return statement to infer.
+        # Preserve a complete explicit contract when output inference found none.
+        if ctx.func_type == "extern" and ret_type is None and isinstance(func_def.returns, ast.Subscript):
+            ret_type = ast.unparse(_fold_const_names(func_def.returns, ctx.py_globals))
         ret_ann = f" -> {ret_type}" if ret_type else ""
 
         # External C++ kernel: emit header-only declaration(s) backed by the

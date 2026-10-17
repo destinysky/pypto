@@ -11,6 +11,7 @@ and which of them the runtime is allowed to reuse between launches.
 | ---- | ------ |
 | [Compiling](00-compile.md) | `ir.compile` and its parameters, `JITFunction.compile`, the artifact directory, pass dumps |
 | [Running](01-run.md) | `CompiledProgram`'s contract, `ChipWorker`, `DeviceTensor`, and the `RunConfig` fields that affect dispatch |
+| [Operator recovery](02-operator-recovery.md) | Opt-in local A5 SDMA replay, safety contracts and supported graphs |
 
 ## Where PyPTO stops
 

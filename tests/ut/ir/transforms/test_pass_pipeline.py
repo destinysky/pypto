@@ -13,6 +13,7 @@ import pypto
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir, passes
+from pypto.backend import BackendType
 
 
 def _make_simple_program():
@@ -338,6 +339,28 @@ class TestAutoVerificationPipeline:
         program = _make_non_ssa_program()
         result = pipeline.run(program)
         assert result is not None
+
+    @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+    def test_backend_pass_without_context(self, ascend_backend):
+        """Backend-dependent passes get a scoped context without hiding checks."""
+        assert passes.PassContext.current() is None
+        pipeline = passes.PassPipeline()
+        pipeline.add_pass(passes.inject_gm_pipe_buffer())
+        program = _make_simple_program()
+        result = pipeline.run(program)
+        ir.assert_structural_equal(result, program)
+        assert passes.PassContext.current() is None
+
+    def test_default_context_restored_after_verification_error(self):
+        """A verifier failure inside the pipeline must not leak its context."""
+        assert passes.PassContext.current() is None
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.SSAForm)
+        pipeline = passes.PassPipeline()
+        pipeline.add_pass(passes.run_verifier(properties))
+        with pytest.raises(pypto.Error, match="IR Verification Report"):
+            pipeline.run(_make_ssa_violating_program())
+        assert passes.PassContext.current() is None
 
     def test_valid_program_passes_verification_with_context(self):
         """A valid program passes verification via PassContext."""

@@ -264,6 +264,7 @@ void DistributedCodegen::EmitImports() {
   // per-dispatch DFX ``output_prefix`` (``<base>/rank{worker}/d{k}``); the
   // namespacing half is a no-op when DFX is off.
   emitter_.EmitLine("from pypto.runtime.distributed_runner import _submit_chip");
+  emitter_.EmitLine("from pypto.runtime.operator_recovery import _add_dispatch_dependency, _get_recovery");
 }
 
 void DistributedCodegen::EmitFunction(const ir::FunctionPtr& func) {
@@ -1125,11 +1126,22 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
   // would be rejected at run time. Order within the scalar list is preserved,
   // so the layout still matches the callee parameter list.
   std::vector<std::string> scalar_lines;
+  std::vector<std::string> recovery_entries;
+  int tensor_index = 0;
+  int scalar_index = 0;
 
   for (size_t i = 0; i < call->args_.size(); ++i) {
     if (ir::IsA<ir::CommCtxType>(call->args_[i]->GetType())) {
-      scalar_lines.push_back(ta_var + ".add_scalar(" +
-                             ResolveCommCtxArg(call->args_[i], rank_expr, call->span_) + ")");
+      const auto address = ResolveCommCtxArg(call->args_[i], rank_expr, call->span_);
+      const std::string suffix = ".device_ctx";
+      if (address.size() > suffix.size() && address.compare(address.size() - suffix.size(), suffix.size(), suffix) == 0) {
+        recovery_entries.push_back("('context', " + std::to_string(scalar_index) + ", " +
+                                   address.substr(0, address.size() - suffix.size()) + ", None)");
+      } else {
+        recovery_entries.push_back("('context', " + std::to_string(scalar_index) + ", None, None)");
+      }
+      ++scalar_index;
+      scalar_lines.push_back(ta_var + ".add_scalar(" + address + ")");
       continue;
     }
 
@@ -1162,6 +1174,9 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
         comm_arg_scopes.push_back(owning_scope);
       }
       const std::string handle_var = HandleVarForScope(owning_scope);
+      recovery_entries.push_back("('window', " + std::to_string(tensor_index) + ", " + handle_var + "[" +
+                                 rank_expr + "], " + handle_var + "[" + rank_expr + "].buffers[\"" + name + "\"])");
+      ++tensor_index;
       emitter_.EmitLine(ta_var + ".add_tensor(" + handle_var + "[" + rank_expr + "].buffers[\"" + name +
                         "\"].tensor(shapes=" + shape + ", dtype=" + dtype_enum + "), " + tag + ")");
       continue;
@@ -1173,6 +1188,7 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
       if (i < callee->param_directions_.size()) {
         tag = ParamDirectionToTensorArgType(callee->param_directions_[i]);
       }
+      ++tensor_index;
       emitter_.EmitLine(ta_var + ".add_tensor(make_tensor_arg(orch._worker, tensors[\"" + arg_str + "\"]), " +
                         tag + ")");
       continue;
@@ -1181,6 +1197,7 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
     // ScalarType formal: pass through via ``add_scalar`` in IR-argument order
     // so the runtime TaskArgs layout matches the callee parameter list.
     if (ir::As<ir::ScalarType>(call->args_[i]->GetType())) {
+      ++scalar_index;
       scalar_lines.push_back(ta_var + ".add_scalar(" + arg_str + ")");
       continue;
     }
@@ -1277,13 +1294,22 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
         VisitExpr(submit->deps_[i]);
         const std::string dep = current_expr_value_;
         current_expr_value_.clear();
-        emitter_.EmitLine(ta_var + ".add_dep_wait(" + dep + ")");
+        emitter_.EmitLine("_add_dispatch_dependency(orch, " + ta_var + ", " + dep + ")");
       }
+    }
+    if (!recovery_entries.empty()) {
+      emitter_.EmitLine("if _get_recovery(orch) is not None:");
+      std::string entries;
+      for (const auto& entry : recovery_entries) {
+        if (!entries.empty()) entries += ", ";
+        entries += entry;
+      }
+      emitter_.EmitLine("    orch._pypto_recovery.annotate(" + ta_var + ", [" + entries + "])");
     }
     emitter_.EmitLine("_keep.append(" + ta_var + ")");
     const std::string worker_arg = rank_expr.empty() ? "None" : rank_expr;
     const std::string submit_expr = "_submit_chip(orch, callables[\"" + callee->name_ + "\"], " + ta_var +
-                                    ", config, " + worker_arg + ")";
+                                    ", config, " + worker_arg + ", recovery_name=\"" + callee->name_ + "\")";
     if (submit) {
       // The producer TaskId is the LAST element of the Submit's own return
       // tuple (the parser builds ``TupleType([*callee returns, Scalar[TASK_ID]])``).

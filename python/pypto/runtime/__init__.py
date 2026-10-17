@@ -69,6 +69,7 @@ from .distributed_runner import (
 from .log_config import _ensure_configured as _ensure_log_configured
 from .log_config import configure_log
 from .log_config import current_level as log_level
+from .operator_recovery import OperatorRecoveryConfig
 from .pto_isa import ensure_pto_isa_root, pto_isa_include_dir
 from .runner import (
     CompileOptions,
@@ -107,6 +108,7 @@ __all__ = [
     "DfxOptions",
     "ExecutionMode",
     "RunConfig",
+    "OperatorRecoveryConfig",
     "RunResult",
     "ScalarSpec",
     "TensorSpec",
