@@ -1444,6 +1444,7 @@ def _make_dispatch_orchestration(
     device_nums: int,
     keepalive: list[Any],
     operator_recovery: OperatorRecoveryConfig | None = None,
+    recovery_effects: dict | None = None,
 ) -> Callable[..., None]:
     """Build one orchestration closure over a handle-owned metadata frame."""
     # ``world_size`` is the only worker-level scalar the entry needs; codegen
@@ -1467,13 +1468,14 @@ def _make_dispatch_orchestration(
         orch._pypto_chip_count = device_nums
         orch._pypto_commless_seq = 0
         capture = (
-            _RecoveryGraph(operator_recovery, device_nums, chip_cids)
+            _RecoveryGraph(device_nums, recovery_effects or {}, orch)
             if operator_recovery is not None
             else None
         )
         if capture is not None:
-            orch.defer_dispatch_until_submitted()
+            orch.enable_incremental_recovery()
             orch._pypto_recovery = capture
+            keepalive.append(capture)
         try:
             entry_fn(
                 orch,
@@ -1486,8 +1488,7 @@ def _make_dispatch_orchestration(
                 world_size=device_nums,
             )
             if capture is not None:
-                capture.flush(orch)
-                keepalive.append(capture)
+                capture.finish()
         finally:
             if capture is not None:
                 orch._pypto_recovery = None
@@ -1505,6 +1506,7 @@ def _submit_dispatch(
     device_nums: int,
     keepalive: list[Any],
     operator_recovery: OperatorRecoveryConfig | None = None,
+    recovery_effects: dict | None = None,
 ) -> Any:
     """Submit one orchestration closure and return Simpler's run handle."""
     orch_fn = _make_dispatch_orchestration(
@@ -1516,6 +1518,7 @@ def _submit_dispatch(
         device_nums,
         keepalive,
         operator_recovery,
+        recovery_effects,
     )
     return w.submit(orch_fn)
 
@@ -1995,6 +1998,13 @@ class DistributedWorker(Worker):
                     base_tensor_frames.append(base_tensors)
                 self._states[prog] = {
                     "entry_fn": entry_fn,
+                    "recovery_effects": (
+                        json.loads((Path(prog.output_dir) / "distributed_meta.json").read_text()).get(
+                            "recovery_effects", {}
+                        )
+                        if operator_recovery is not None
+                        else {}
+                    ),
                     "base_tensor_frames": tuple(base_tensor_frames),
                     "call_config": _make_call_config(prog._distributed_config),
                     "param_infos": tuple(prog._get_metadata()[0]),
@@ -2452,7 +2462,7 @@ class DistributedWorker(Worker):
             state["device_nums"],
             keepalive,
             **(
-                {"operator_recovery": self._operator_recovery}
+                {"operator_recovery": self._operator_recovery, "recovery_effects": state["recovery_effects"]}
                 if getattr(self, "_operator_recovery", None) is not None
                 else {}
             ),

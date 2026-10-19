@@ -1211,6 +1211,7 @@ REGISTER_OP("tile.write")
 // ============================================================================
 
 REGISTER_OP("tile.get_block_idx")
+    .deterministic_memory_effects(false)
     .set_op_category("TileOp")
     .no_execution_memory_access()
     .set_description("Get the current block index")
@@ -1223,6 +1224,7 @@ REGISTER_OP("tile.get_block_idx")
     });
 
 REGISTER_OP("tile.get_subblock_idx")
+    .deterministic_memory_effects(false)
     .set_op_category("TileOp")
     .no_execution_memory_access()
     .set_description("Get the current sub-block (vector core) index")
@@ -1235,6 +1237,7 @@ REGISTER_OP("tile.get_subblock_idx")
     });
 
 REGISTER_OP("tile.get_block_num")
+    .deterministic_memory_effects(false)
     .set_op_category("TileOp")
     .no_execution_memory_access()
     .set_description("Get the total number of blocks in the current SPMD task")
@@ -1258,6 +1261,7 @@ REGISTER_OP("tile.read")
     });
 
 REGISTER_OP("tile.create")
+    .deterministic_memory_effects(false)
     .set_op_category("TileOp")
     .set_description("Create a tile")
     .set_core_affinity(core_affinity::CoreAffinity::SHARED)
@@ -1277,6 +1281,7 @@ REGISTER_OP("tile.create")
     });
 
 REGISTER_OP("tile.load")
+    .deterministic_memory_effects(true)
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Copy data from tensor to unified buffer (tile)")
@@ -1303,6 +1308,7 @@ REGISTER_OP("tile.load")
     });
 
 REGISTER_OP("tile.store")
+    .deterministic_memory_effects(true)
     .set_op_category("TileOp")
     .set_description("Copy data from unified buffer (tile) to tensor")
     .add_argument("tile", "Source tile (TileType)")
@@ -1651,6 +1657,7 @@ REGISTER_OP("tile.mgather")
     });
 
 REGISTER_OP("tile.move")
+    .deterministic_memory_effects(true)
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Move tile between memory levels (Vec/Mat/Left/Right/LeftScale/RightScale)")
@@ -1674,6 +1681,7 @@ REGISTER_OP("tile.move")
 // preserves the pre-refactor behavior (tile.* fallback → VECTOR); a future
 // refinement could classify by the memory_space arg if a use case arises.
 REGISTER_OP("tile.alloc")
+    .deterministic_memory_effects(false)
     .set_op_category("TileOp")
     .no_execution_memory_access()
     .set_description("Declare on-chip memory allocation, returning a Ptr")
@@ -1692,6 +1700,7 @@ REGISTER_OP("tile.alloc")
     });
 
 REGISTER_OP("tile.full")
+    .deterministic_memory_effects(true)
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Create a tile of specified shape and filling value in UB")
@@ -1705,6 +1714,7 @@ REGISTER_OP("tile.full")
     });
 
 REGISTER_OP("tile.ci")
+    .deterministic_memory_effects(true)
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Generate a contiguous integer sequence into a destination tile (pto.tci)")

@@ -264,7 +264,7 @@ void DistributedCodegen::EmitImports() {
   // per-dispatch DFX ``output_prefix`` (``<base>/rank{worker}/d{k}``); the
   // namespacing half is a no-op when DFX is off.
   emitter_.EmitLine("from pypto.runtime.distributed_runner import _submit_chip");
-  emitter_.EmitLine("from pypto.runtime.operator_recovery import _add_dispatch_dependency, _get_recovery");
+  emitter_.EmitLine("from pypto.runtime.operator_recovery import _add_dispatch_dependency, _bind_recovery_domain, _get_recovery");
 }
 
 void DistributedCodegen::EmitFunction(const ir::FunctionPtr& func) {
@@ -606,6 +606,7 @@ void DistributedCodegen::VisitStmt_(const ir::CommDomainScopeStmtPtr& op) {
   emitter_.DecreaseIndent();
   emitter_.EmitLine(") as " + handle_var + ":");
   emitter_.IncreaseIndent();
+  emitter_.EmitLine("_bind_recovery_domain(orch, " + handle_var + ")");
 
   // The per-rank comm ordering token for this scope is allocated in
   // ``_alloc_intermediates`` (see EmitAllocIntermediates), NOT here: it must
@@ -1188,6 +1189,8 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
       if (i < callee->param_directions_.size()) {
         tag = ParamDirectionToTensorArgType(callee->param_directions_[i]);
       }
+      recovery_entries.push_back("('tensor', " + std::to_string(tensor_index) +
+                                 ", None, tensors[\"" + arg_str + "\"])");
       ++tensor_index;
       emitter_.EmitLine(ta_var + ".add_tensor(make_tensor_arg(orch._worker, tensors[\"" + arg_str + "\"]), " +
                         tag + ")");

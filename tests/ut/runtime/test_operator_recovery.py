@@ -1,22 +1,23 @@
 # Copyright (c) PyPTO Contributors.
 # Licensed under CANN Open Software License Agreement Version 2.0.
-"""Check rank grouping and conservative admission before any native work."""
+"""Rank publication and concrete alias checks for compiler-derived contracts."""
 
-import importlib.util
 import sys
-from contextlib import contextmanager
-from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from pypto.runtime.operator_recovery import OperatorRecoveryConfig, _get_recovery, _RecoveryGraph
+import torch
+from pypto.runtime.operator_recovery import OperatorRecoveryConfig, _RecoveryGraph
 
 
 class Args:
     def __init__(self):
         self.dependencies = []
         self.bindings = []
+
+    def tensor_count(self):
+        return 2
 
     def add_dep_wait(self, dependency):
         self.dependencies.append(dependency)
@@ -36,104 +37,185 @@ def graph(monkeypatch):
     api.RecoveryArgKind = SimpleNamespace(WINDOW_TENSOR="window", COMM_CONTEXT="context")
     api.ReplaySafety = SimpleNamespace(REPLAY_SAFE="safe", UNKNOWN="unknown")
     monkeypatch.setitem(sys.modules, "simpler.task_interface", api)
-    capture = _RecoveryGraph(OperatorRecoveryConfig(replay_safe=("exchange",)), 2, {"exchange": 2})
+    proof = {"safe": True, "complete": True, "tensor_effects": [1, 2], "reasons": []}
+    capture = _RecoveryGraph(2, {"task": proof}, MagicMock())
     contexts = [
         SimpleNamespace(
             domain_rank=rank,
             domain_size=2,
             recovery_binding=SimpleNamespace(
-                allocation_id=0, generation=4, local_window_base=10000 + rank * 1000
+                allocation_id=0, generation=1, local_window_base=10000 + rank * 1000
             ),
         )
         for rank in range(2)
     ]
+    capture.bind_domain(contexts)
     return capture, contexts
 
 
-def test_rank_major_capture_keeps_graph_order_and_explicit_safety(graph):
+def add(capture, contexts, rank, config, *, alias=False, output=None):
+    args = Args()
+    source = torch.zeros(4)
+    output = source if alias else torch.empty(4) if output is None else output
+    capture.annotate(args, [("tensor", 0, None, source), ("tensor", 1, None, output)])
+    handle = capture.submit(1, args, config, rank, "task")
+    return args, handle
+
+
+def test_compiler_proof_requires_concrete_non_aliasing_arguments(graph):
+    capture, contexts = graph
+    config, orch = object(), capture.orch
+    a, _ = add(capture, contexts, 0, config)
+    b, _ = add(capture, contexts, 1, config)
+    capture.finish()
+    orch.submit_next_level_group.assert_called_once()
+    assert a.metadata.replay_safety == b.metadata.replay_safety == "safe"
+    assert a.metadata.participants == [0, 1]
+    assert a.bindings == b.bindings == []
+
+
+def test_actual_alias_rejects_an_otherwise_safe_function(graph):
     capture, contexts = graph
     config = object()
-    all_args = {}
-    for rank in range(2):
-        previous = None
-        for sequence, name in enumerate(("warmup", "exchange", "finish")):
-            args = Args()
-            ctx = contexts[rank]
-            capture.annotate(
-                args,
-                [
-                    ("window", 2, ctx, SimpleNamespace(base=ctx.recovery_binding.local_window_base + 256)),
-                    ("context", 1, ctx, None),
-                ],
-            )
-            if previous is not None:
-                capture.add_dependency(args, previous)
-            previous = capture.submit(sequence, args, config, rank, name)
-            all_args[rank, sequence] = args
-    orch = MagicMock()
-    orch.submit_next_level_group.side_effect = ["A", "B", "C"]
-    capture.flush(orch)
-    assert orch.submit_next_level_group.call_count == 3
-    for sequence, call in enumerate(orch.submit_next_level_group.call_args_list):
-        assert call.kwargs["workers"] == [0, 1]
-        assert call.args[1] == [all_args[0, sequence], all_args[1, sequence]]
-        for args in call.args[1]:
-            assert args.dependencies == ([] if sequence == 0 else ["ABC"[sequence - 1]])
-            assert args.metadata.participants == [0, 1]
-            assert args.metadata.op_seq == sequence + 1
-            assert args.metadata.replay_safety == ("safe" if sequence == 1 else "unknown")
-            assert [(e.kind, e.index, e.offset) for e in args.bindings[0].arguments] == [
-                ("window", 2, 256),
-                ("context", 1, 0),
-            ]
-    assert all_args[0, 0].metadata.logical_run_id == all_args[1, 2].metadata.logical_run_id
+    a, _ = add(capture, contexts, 0, config, alias=True)
+    b, _ = add(capture, contexts, 1, config)
+    capture.finish()
+    assert a.metadata.replay_safety == b.metadata.replay_safety == "unknown"
 
 
-@pytest.mark.parametrize("misuse", ["missing-rank", "different-callable", "forward-dependency", "wrong-rank"])
-def test_unsafe_capture_never_admits_a_task(graph, misuse):
+def test_overlapping_rank_outputs_are_not_approved(graph):
     capture, contexts = graph
-    config, orch = object(), MagicMock()
-    a, b = Args(), Args()
-    capture.annotate(a, [("context", 0, contexts[0], None)])
-    capture.annotate(b, [("context", 0, contexts[0 if misuse == "wrong-rank" else 1], None)])
-    first = capture.submit(2, a, config, 0, "exchange")
-    with pytest.raises(ValueError):
-        if misuse != "missing-rank":
-            capture.submit(99 if misuse == "different-callable" else 2, b, config, 1, "exchange")
-        if misuse == "forward-dependency":
-            capture.add_dependency(b, first)
-        capture.flush(orch)
+    config, output = object(), torch.empty(4)
+    a, _ = add(capture, contexts, 0, config, output=output)
+    b, _ = add(capture, contexts, 1, config, output=output)
+    capture.finish()
+    assert a.metadata.replay_safety == b.metadata.replay_safety == "unknown"
+
+
+def test_incomplete_group_is_never_dispatched(graph):
+    capture, contexts = graph
+    orch = capture.orch
+    add(capture, contexts, 0, object())
+    with pytest.raises(ValueError, match="full-rank"):
+        capture.finish()
     orch.submit_next_level_group.assert_not_called()
 
 
-def test_cross_graph_dependency_and_invalid_contract_are_rejected(graph):
-    capture, _ = graph
-    other = _RecoveryGraph(OperatorRecoveryConfig(("exchange",)), 2, {"exchange": 2})
-    with pytest.raises(ValueError, match="same captured graph"):
-        other.add_dependency(Args(), capture.submit(2, Args(), object(), 0, "exchange"))
-    with pytest.raises(ValueError, match="not registered"):
-        _RecoveryGraph(OperatorRecoveryConfig(("typo",)), 2, {"exchange": 2})
-    for kwargs in ({"max_retries": -1}, {"timeout_s": 0}, {"backoff_s": float("nan")}):
+def test_manual_safety_override_is_removed():
+    with pytest.raises(TypeError):
+        OperatorRecoveryConfig(replay_safe=("task",))
+    for options in ({"max_retries": -1}, {"timeout_s": 0}, {"backoff_s": float("nan")}):
         with pytest.raises(ValueError):
-            OperatorRecoveryConfig(("exchange",), **kwargs)
-    assert _get_recovery(MagicMock()) is None
+            OperatorRecoveryConfig(**options)
+
+
+@pytest.mark.parametrize("misuse", ["different-callable", "wrong-rank", "forward-dependency"])
+def test_group_validation_precedes_publication(graph, misuse):
+    capture, contexts = graph
+    config = object()
+    a, handle = add(capture, contexts, 0, config)
+    b = Args()
+    entries = [("tensor", 0, None, torch.zeros(4)), ("tensor", 1, None, torch.empty(4))]
+    if misuse == "wrong-rank":
+        entries.append(("context", 0, contexts[0], None))
+    elif misuse == "forward-dependency":
+        capture.add_dependency(b, handle)
+    capture.annotate(b, entries)
+    with pytest.raises(ValueError):
+        capture.submit(99 if misuse == "different-callable" else 1, b, config, 1, "task")
+    capture.orch.submit_next_level_group.assert_not_called()
+    with pytest.raises(ValueError, match="already submitted"):
+        capture.add_dependency(a, handle)
+
+
+@pytest.mark.parametrize("case", ["independent", "raw", "war", "waw", "disjoint"])
+def test_only_actual_memory_hazards_order_groups(graph, case):
+    graph, _contexts = graph
+    first, second, config = object(), object(), object()
+    graph.orch.submit_next_level_group.side_effect = [first, second]
+    inputs = [torch.zeros(4), torch.zeros(4)]
+    storage = [torch.empty(8), torch.empty(8)]
+    outputs = [value[:4] for value in storage]
+    for rank in range(2):
+        args = Args()
+        graph.annotate(args, [("tensor", 0, None, inputs[rank]), ("tensor", 1, None, outputs[rank])])
+        graph.submit(1, args, config, rank, "task")
+    members = []
+    for rank in range(2):
+        source = outputs[rank] if case == "raw" else inputs[rank] if case == "independent" else torch.zeros(4)
+        output = (
+            inputs[rank]
+            if case == "war"
+            else outputs[rank]
+            if case == "waw"
+            else storage[rank][4:]
+            if case == "disjoint"
+            else torch.empty(4)
+        )
+        args = Args()
+        graph.annotate(args, [("tensor", 0, None, source), ("tensor", 1, None, output)])
+        graph.submit(1, args, config, rank, "task")
+        members.append(args)
+    graph.finish()
+    expected = [first] if case in ("raw", "war", "waw") else []
+    assert all(args.dependencies == expected for args in members)
+    assert all(not args.metadata.uses_communication for args in members)
+    print(f"[PYPTO_RECOVERY_TEST] HAZARD_FRONTIER_PASS case={case}", flush=True)
+
+
+@pytest.mark.parametrize("reason", ["opaque", "extra-output"])
+def test_opaque_effects_and_unaccounted_outputs_remain_barriers(graph, reason):
+    graph, contexts = graph
+    config = object()
+    handles = [object() for _ in range(3)]
+    graph.orch.submit_next_level_group.side_effect = handles
+    for rank in range(2):
+        add(graph, contexts, rank, config)
+    opaque = []
+    for rank in range(2):
+        args = Args()
+        if reason == "extra-output":
+            args.tensor_count = lambda: 3
+        graph.proofs["opaque"] = {"safe": False, "complete": False}
+        graph.annotate(args, [("tensor", 0, None, torch.zeros(4)), ("tensor", 1, None, torch.empty(4))])
+        graph.submit(1, args, config, rank, "opaque" if reason == "opaque" else "task")
+        opaque.append(args)
+    assert all(
+        args.metadata.replay_safety == "unknown" and args.dependencies == [handles[0]] for args in opaque
+    )
+    successors = [add(graph, contexts, rank, config)[0] for rank in range(2)]
+    assert all(args.dependencies == [handles[1]] for args in successors)
+
+
+def test_explicit_dependency_survives_without_a_memory_hazard(graph):
+    graph, contexts = graph
+    config, first = object(), object()
+    graph.orch.submit_next_level_group.side_effect = [first, object()]
+    _, producer = add(graph, contexts, 0, config)
+    add(graph, contexts, 1, config)
+    consumers = []
+    for rank in range(2):
+        args = Args()
+        graph.annotate(args, [("tensor", 0, None, torch.zeros(4)), ("tensor", 1, None, torch.empty(4))])
+        graph.add_dependency(args, producer)
+        graph.submit(1, args, config, rank, "task")
+        consumers.append(args)
+    assert all(args.dependencies == [first] for args in consumers)
 
 
 def test_generated_program_native_argument_contract(tmp_path):
-    """Compile the actual hardware program, then run its generated host code on CPU.
-
-    No device execution occurs. Real native TaskArgs validate scalar/tensor binding
-    indices and full-rank metadata; CPU mailbox endpoints complete the generated native groups.
-    """
+    """The real generated host graph reaches native mailboxes before graph closure."""
     api = pytest.importorskip("simpler.task_interface")
     import ctypes  # noqa: PLC0415
+    import runpy  # noqa: PLC0415
     import threading  # noqa: PLC0415
+    from contextlib import contextmanager  # noqa: PLC0415
+    from pathlib import Path  # noqa: PLC0415
 
     import simpler.worker as worker_module  # noqa: PLC0415
-    import torch  # noqa: PLC0415
     from _task_interface import _mailbox_load_i32, _mailbox_store_i32  # noqa: PLC0415
-    from pypto.ir import DistributedConfig  # noqa: PLC0415
-    from pypto.runtime import RunConfig  # noqa: PLC0415
+    from pypto import ir  # noqa: PLC0415
+    from pypto.pypto_core import passes  # noqa: PLC0415
     from pypto.runtime.distributed_runner import (  # noqa: PLC0415
         _call_alloc_intermediates,
         _load_orch_entry,
@@ -143,25 +225,27 @@ def test_generated_program_native_argument_contract(tmp_path):
     from simpler.orchestrator import Orchestrator  # noqa: PLC0415
     from simpler.worker import Worker  # noqa: PLC0415
 
-    test_file = Path(__file__).resolve().parents[2] / "st/distributed/test_l3_operator_recovery.py"
-    spec = importlib.util.spec_from_file_location("_recovery_program_contract", test_file)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    config = RunConfig(
-        platform="a5",
-        save_kernels=True,
-        save_kernels_dir=str(tmp_path),
-        distributed_config=DistributedConfig(device_ids=[0, 1], num_sub_workers=0, aicpu_thread_num=2),
-    )
-    compiled = module.recovery_program.compile(config=config)
-    entry, alloc = _load_orch_entry(compiled._output_dir)
-    tensors = {
-        "x": torch.zeros((2, 1, module.N)),
-        "y": torch.zeros((2, 1, module.N)),
-        "stats": torch.zeros((2, 8), dtype=torch.int32),
-        "mode": 1,
+    source = Path(__file__).resolve().parents[2] / "st/distributed/test_l3_operator_recovery.py"
+    definitions = runpy.run_path(str(source))
+    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+        compiled = ir.compile(
+            definitions["build_program"](),
+            platform="a5",
+            skip_ptoas=True,
+            output_dir=str(tmp_path / "program"),
+            distributed_config=ir.DistributedConfig(device_ids=[0, 1], num_sub_workers=0),
+        )
+    import json  # noqa: PLC0415
+
+    proofs = json.loads((compiled.output_dir / "distributed_meta.json").read_text())["recovery_effects"]
+    entry, alloc = _load_orch_entry(compiled.output_dir)
+    values = {
+        "x": torch.zeros((2, 1, definitions["N"])),
+        "y": torch.zeros((2, 1, definitions["N"])),
+        "stats": torch.zeros((2, 1, 8), dtype=torch.int32),
+        "mode": 0,
     }
-    tensors = {info.name: tensors[info.name.split("__ssa_")[0]] for info in compiled._get_metadata()[0]}
+    tensors = {info.name: values[info.name.split("__ssa_")[0]] for info in compiled._get_metadata()[0]}
     _call_alloc_intermediates(alloc, tensors, 2)
     for value in tensors.values():
         if isinstance(value, torch.Tensor):
@@ -171,6 +255,7 @@ def test_generated_program_native_argument_contract(tmp_path):
     native = api._Worker(3, 1 << 20)
     mailboxes = [ctypes.create_string_buffer(api.MAILBOX_SIZE) for _ in range(2)]
     stopping = threading.Event()
+    first_done = [threading.Event(), threading.Event()]
     completed = [0, 0]
 
     def complete_on_cpu(rank, address):
@@ -181,6 +266,7 @@ def test_generated_program_native_argument_contract(tmp_path):
                 ctypes.c_int32.from_address(task + worker_module._OFF_ERROR).value = 0
                 completed[rank] += 1
                 _mailbox_store_i32(task, worker_module._TASK_DONE)
+                first_done[rank].set()
 
     threads = []
     for rank, memory in enumerate(mailboxes):
@@ -231,8 +317,7 @@ def test_generated_program_native_argument_contract(tmp_path):
 
         def submit_next_level_group(self, callable_id, args_list, cfg, *, workers):
             captured.append((callable_id, args_list))
-            # CPU mailboxes complete these native groups without executing kernels.
-            return native_orch.submit_next_level_group(
+            handle = native_orch.submit_next_level_group(
                 bytes([callable_id]) * 32,
                 "CHIP_CALLABLE",
                 "LOCAL_CHIP",
@@ -240,6 +325,9 @@ def test_generated_program_native_argument_contract(tmp_path):
                 cfg,
                 workers,
             )
+            if len(captured) == 1:
+                assert all(event.wait(3) for event in first_done), "first group waited for graph closure"
+            return handle
 
     host, keep = Host(), []
     callback = _make_dispatch_orchestration(
@@ -250,22 +338,22 @@ def test_generated_program_native_argument_contract(tmp_path):
         api.CallConfig(),
         2,
         keep,
-        OperatorRecoveryConfig(("exchange",)),
+        OperatorRecoveryConfig(),
+        proofs,
     )
     try:
         callback(host, None, None)
-        assert completed == [0, 0], "native work escaped graph-build admission"
+        assert all(event.is_set() for event in first_done)
+        assert not native_orch._wait_run_for(run, 0.001), "an open graph retired early"
         with pytest.raises(RuntimeError, match="precede"):
-            host.defer_dispatch_until_submitted()
+            host.enable_incremental_recovery()
         assert host._pypto_recovery is None
         assert [cid for cid, _ in captured] == [1, 2, 3]
         for sequence, (_, members) in enumerate(captured):
             for rank, args in enumerate(members):
                 assert args.recovery_metadata.rank == rank
                 assert args.recovery_metadata.op_seq == sequence + 1
-                assert args.recovery_metadata.replay_safety == (
-                    api.ReplaySafety.REPLAY_SAFE if sequence == 1 else api.ReplaySafety.UNKNOWN
-                )
+                assert args.recovery_metadata.replay_safety == api.ReplaySafety.REPLAY_SAFE
                 for binding in args.domain_bindings:
                     assert binding.domain.device_ctx == 0x110000 + rank * 0x100000
                     for argument in binding.arguments:
@@ -273,7 +361,7 @@ def test_generated_program_native_argument_contract(tmp_path):
                             assert args.scalar(argument.index) == binding.domain.device_ctx
                         else:
                             assert argument.index < args.tensor_count()
-        print("[PYPTO_RECOVERY_TEST] GENERATED_NATIVE_GRAPH_PASS")
+        print("[PYPTO_RECOVERY_TEST] INCREMENTAL_NATIVE_GRAPH_PASS", flush=True)
     finally:
         native_orch._close_run_submission(run)
         try:
@@ -286,3 +374,7 @@ def test_generated_program_native_argument_contract(tmp_path):
                 thread.join(3)
                 assert not thread.is_alive()
             host._worker.close()
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

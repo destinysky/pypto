@@ -1043,6 +1043,16 @@ void BindIR(nb::module_& m) {
       },
       nb::arg("op_name"), "Whether an operator declared its per-argument effects (False = never classified)");
 
+  ir.def("get_op_replay_properties", [](const std::string& name) {
+    const auto& entry = OpRegistry::GetInstance().GetEntry(name);
+    nb::dict result;
+    result["deterministic"] = entry.HasDeterministicMemoryEffects();
+    result["accesses_memory"] = entry.ReplayAccessesMemory();
+    const auto alias = entry.GetOutputReusesInputArg();
+    result["result_alias"] = alias ? nb::cast(*alias) : nb::none();
+    return result;
+  }, nb::arg("op_name"), "Compiler-owned deterministic memory effects and result alias, or unknown");
+
   ir.def(
       "op_has_declared_arg_effect",
       [](const std::string& op_name, size_t arg_index) {

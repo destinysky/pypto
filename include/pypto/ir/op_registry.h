@@ -724,6 +724,16 @@ class OpRegistryEntry {
     return memory_spec_->output_reuses_input_arg;
   }
 
+  // Results and declared argument effects depend only on explicit operands.
+  // Unknown operators keep the default; this is not a user replay override.
+  inline OpRegistryEntry& deterministic_memory_effects(bool accesses_memory = true) {
+    deterministic_memory_effects_ = true;
+    replay_accesses_memory_ = accesses_memory;
+    return *this;
+  }
+  [[nodiscard]] bool HasDeterministicMemoryEffects() const { return deterministic_memory_effects_; }
+  [[nodiscard]] bool ReplayAccessesMemory() const { return replay_accesses_memory_; }
+
   /// Mark this operation as NOT safe for in-place execution (src buffer == dst buffer).
   /// The shared allocation-constraint analysis prevents producer-consumer reuse
   /// for such operations in both MemoryReuse and DSA-RP.
@@ -1147,6 +1157,8 @@ class OpRegistryEntry {
       lane_invariant_args_;     ///< Args carrying no lane-indexed data; nullopt = none declared
   bool is_inplace_safe_{true};  ///< Whether the op supports in-place execution (src == dst buffer)
   ExecutionMemoryAccessEvidence execution_memory_access_evidence_{ExecutionMemoryAccessEvidence::Unknown};
+  bool deterministic_memory_effects_{false};
+  bool replay_accesses_memory_{true};
   std::set<size_t> forbid_output_alias_args_;  ///< Input args whose buffer the output must not reuse
   std::optional<core_affinity::CoreAffinity> core_affinity_;     ///< Explicit core-affinity override
   std::optional<core_affinity::CrossCoreRole> cross_core_role_;  ///< Cross-core role (for predicates)

@@ -3443,6 +3443,9 @@ def op_has_declared_arg_effects(op_name: str) -> bool:
         Exception: If operator is not registered
     """
 
+def get_op_replay_properties(op_name: str) -> dict[str, Any]:
+    """Compiler-owned deterministic memory semantics, access flag and result alias."""
+
 def op_has_declared_arg_effect(op_name: str, arg_index: int) -> bool:
     """Whether the registration reached a verdict about one argument.
 

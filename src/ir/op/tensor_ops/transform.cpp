@@ -674,6 +674,7 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
 // ConvertTensorToTileOps propagate a consumer's memory-space requirement back
 // through reshape to a load-like producer such as tensor.slice.
 REGISTER_OP("tensor.reshape")
+    .deterministic_memory_effects(false)
     .set_op_category("TensorOp")
     .set_description("Reshape tensor to new shape")
     .add_argument("input", "Input tensor (TensorType)")
@@ -688,6 +689,7 @@ REGISTER_OP("tensor.reshape")
     });
 
 REGISTER_OP("tensor.reinterpret_view")
+    .deterministic_memory_effects(false)
     .set_op_category("TensorOp")
     .set_description(
         "Zero-copy reinterpretation of a packed tensor with a different dtype and equal byte size")
@@ -716,6 +718,7 @@ REGISTER_OP("tensor.transpose")
     });
 
 REGISTER_OP("tensor.view")
+    .deterministic_memory_effects(false)
     .set_op_category("TensorOp")
     .set_description(
         "Reinterpret a TensorType over the same physical memory with a canonical shape/layout view. "
@@ -825,6 +828,7 @@ TypePtr DeduceTensorSetValidShapeType(const std::vector<ExprPtr>& args,
 // pure-CUBE InCore scope to MIXED and makes ExpandMixedKernel split it into an
 // AIC/AIV pair (issue #2227).
 REGISTER_OP("tensor.set_validshape")
+    .deterministic_memory_effects(false)
     .set_op_category("TensorOp")
     .set_description("Update valid-shape metadata of a tensor without data movement")
     .add_argument("tensor", "Input tensor (TensorType, 2D)")

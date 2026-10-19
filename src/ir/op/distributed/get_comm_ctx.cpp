@@ -91,6 +91,7 @@ TypePtr DeduceCommCtxScalarType(const std::string& op_name, const std::vector<Ex
 // ============================================================================
 
 REGISTER_OP("pld.system.get_comm_ctx")
+    .deterministic_memory_effects(false)
     .set_description(
         "Return the communication-context handle (CommCtxType) of a window-bound "
         "DistributedTensor. The result is the input to pld.system.rank / "

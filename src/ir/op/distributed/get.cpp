@@ -196,6 +196,7 @@ TypePtr DeduceGetTileType(const std::vector<ExprPtr>& args,
 // staging tile.
 
 REGISTER_OP("pld.tensor.get")
+    .deterministic_memory_effects(true)
     .set_description(
         "Cross-rank get: synchronously read the `peer` rank's slice of the window-bound "
         "DistributedTensor `src` into the local destination `dst` "
@@ -233,6 +234,7 @@ REGISTER_OP("pld.tensor.get")
 // ============================================================================
 
 REGISTER_OP("pld.tile.get")
+    .deterministic_memory_effects(true)
     .set_description(
         "Tile-level form of pld.tensor.get with an explicit VEC staging tile. "
         "Created by ConvertTensorToTileOps; not user-facing.")

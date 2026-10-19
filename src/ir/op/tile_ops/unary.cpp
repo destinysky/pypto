@@ -183,6 +183,7 @@ TypePtr DeduceTileCastType(const std::vector<ExprPtr>& args,
 // ============================================================================
 
 REGISTER_OP("tile.neg")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Negation of a tile (element-wise)")
@@ -195,6 +196,7 @@ REGISTER_OP("tile.neg")
     });
 
 REGISTER_OP("tile.exp")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Exponential function of a tile (element-wise)")
@@ -207,6 +209,7 @@ REGISTER_OP("tile.exp")
     });
 
 REGISTER_OP("tile.sin")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise sine of a tile (radians). FP32 only.")
@@ -219,6 +222,7 @@ REGISTER_OP("tile.sin")
     });
 
 REGISTER_OP("tile.cos")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise cosine of a tile (radians). FP32 only.")
@@ -231,6 +235,7 @@ REGISTER_OP("tile.cos")
     });
 
 REGISTER_OP("tile.recip")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Reciprocal (1/x) of a tile (element-wise)")
@@ -251,6 +256,7 @@ REGISTER_OP("tile.recip")
     });
 
 REGISTER_OP("tile.sqrt")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Square root of a tile (element-wise)")
@@ -263,6 +269,7 @@ REGISTER_OP("tile.sqrt")
     });
 
 REGISTER_OP("tile.rsqrt")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .set_description(
         "Reciprocal square root (1/sqrt(x)) of a tile (element-wise). "
@@ -287,6 +294,7 @@ REGISTER_OP("tile.rsqrt")
     });
 
 REGISTER_OP("tile.cast")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Cast tile to target data type (element-wise)")
@@ -308,6 +316,7 @@ REGISTER_OP("tile.cast")
     });
 
 REGISTER_OP("tile.log")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Natural logarithm of a tile (element-wise)")
@@ -325,6 +334,7 @@ REGISTER_OP("tile.log")
     });
 
 REGISTER_OP("tile.abs")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Absolute value of a tile (element-wise)")
@@ -337,6 +347,7 @@ REGISTER_OP("tile.abs")
     });
 
 REGISTER_OP("tile.relu")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("ReLU activation function of a tile (element-wise)")
@@ -349,6 +360,7 @@ REGISTER_OP("tile.relu")
     });
 
 REGISTER_OP("tile.not")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise bitwise NOT of a tile")

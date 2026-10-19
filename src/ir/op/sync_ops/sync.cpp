@@ -86,6 +86,7 @@ REGISTER_OP("system.bar_all")
 // Register system.fence (Memory Barrier)
 // Attributes: None
 REGISTER_OP("system.fence")
+    .deterministic_memory_effects(false)
     .set_description("Memory barrier over global memory")
     .set_op_category("SyncOp")
     .no_argument()
@@ -108,6 +109,7 @@ REGISTER_OP("system.fence")
 // form; omitting all of them selects the whole-GM form. The registry does not
 // enforce argument count.
 REGISTER_OP("system.cacheinvalid")
+    .deterministic_memory_effects(false)
     .set_description(
         "Invalidate whole GM when called with no args, else the cache line containing a tensor-view base "
         "(always lowered through a partition view; shapes do not cause a range walk)")

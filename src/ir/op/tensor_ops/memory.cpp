@@ -552,6 +552,7 @@ TypePtr DeduceTensorFullType(const std::vector<ExprPtr>& args,
 // ============================================================================
 
 REGISTER_OP("tensor.read")
+    .deterministic_memory_effects(true)
     .set_op_category("TensorOp")
     .set_description("Read a scalar value from a tensor at given indices")
     .add_argument("tensor", "Input tensor (TensorType)")
@@ -562,6 +563,7 @@ REGISTER_OP("tensor.read")
     });
 
 REGISTER_OP("tensor.create")
+    .deterministic_memory_effects(false)
     .set_op_category("TensorOp")
     .set_description("Create a new tensor with specified shape and dtype")
     .add_argument("shape", "Shape dimensions (TupleType of ScalarType(INT64))")
@@ -574,6 +576,7 @@ REGISTER_OP("tensor.create")
     });
 
 REGISTER_OP("tensor.slice")
+    .deterministic_memory_effects(false)
     .set_op_category("TensorOp")
     .set_description("Create a slice (view) of a tensor with new shape and offset")
     .add_argument("input", "Input tensor (TensorType)")
@@ -849,6 +852,7 @@ TypePtr DeduceTensorDimType(const std::vector<ExprPtr>& args,
 }
 
 REGISTER_OP("tensor.dim")
+    .deterministic_memory_effects(false)
     .set_op_category("TensorOp")
     .set_description("Extract a shape dimension from a tensor as a scalar value")
     .add_argument("tensor", "Input tensor (TensorType)")
@@ -906,6 +910,7 @@ TypePtr DeduceTensorWriteType(const std::vector<ExprPtr>& args,
 }
 
 REGISTER_OP("tensor.write")
+    .deterministic_memory_effects(true)
     .set_op_category("TensorOp")
     .set_description("Write a scalar value into a tensor at given indices")
     .add_argument("tensor", "Destination tensor (TensorType)")
@@ -922,6 +927,7 @@ REGISTER_OP("tensor.write")
     });
 
 REGISTER_OP("tensor.alloc")
+    .deterministic_memory_effects(false)
     .set_op_category("TensorOp")
     .set_description("Declare DDR memory allocation, returning a Ptr")
     .add_argument("memory_space", "Memory space (DDR)")

@@ -564,6 +564,7 @@ TypePtr DeduceTileOpBitwiseScalarType(const std::vector<ExprPtr>& args,
 // ============================================================================
 
 REGISTER_OP("tile.mul")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise multiplication of two tiles with broadcasting")
@@ -578,6 +579,7 @@ REGISTER_OP("tile.mul")
     });
 
 REGISTER_OP("tile.add")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise addition of two tiles with broadcasting")
@@ -592,6 +594,7 @@ REGISTER_OP("tile.add")
     });
 
 REGISTER_OP("tile.div")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise division of two tiles with matching physical and valid shapes")
@@ -612,6 +615,7 @@ REGISTER_OP("tile.div")
     });
 
 REGISTER_OP("tile.sub")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise subtraction of two tiles with broadcasting")
@@ -626,6 +630,7 @@ REGISTER_OP("tile.sub")
     });
 
 REGISTER_OP("tile.maximum")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise maximum of two tiles with broadcasting")
@@ -640,6 +645,7 @@ REGISTER_OP("tile.maximum")
     });
 
 REGISTER_OP("tile.minimum")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise minimum of two tiles with broadcasting")
@@ -654,6 +660,7 @@ REGISTER_OP("tile.minimum")
     });
 
 REGISTER_OP("tile.rem")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .set_description("Element-wise floor remainder of two tiles with matching dtype and shape")
     .add_argument("lhs", "Left-hand side tile (TileType)")
@@ -676,6 +683,7 @@ REGISTER_OP("tile.rem")
 // is identical to a plain elementwise binary op; the "partial" behaviour is a
 // runtime valid-region effect, so type deduction is the standard binary one.
 REGISTER_OP("tile.part_add")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .set_description("Partial element-wise add of two tiles (copies the only valid input)")
     .add_argument("src0", "First source tile (TileType)")
@@ -689,6 +697,7 @@ REGISTER_OP("tile.part_add")
     });
 
 REGISTER_OP("tile.part_mul")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .set_description("Partial element-wise multiply of two tiles (copies the only valid input)")
     .add_argument("src0", "First source tile (TileType)")
@@ -702,6 +711,7 @@ REGISTER_OP("tile.part_mul")
     });
 
 REGISTER_OP("tile.part_max")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .set_description("Partial element-wise max of two tiles (copies the only valid input)")
     .add_argument("src0", "First source tile (TileType)")
@@ -715,6 +725,7 @@ REGISTER_OP("tile.part_max")
     });
 
 REGISTER_OP("tile.part_min")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .set_description("Partial element-wise min of two tiles (copies the only valid input)")
     .add_argument("src0", "First source tile (TileType)")
@@ -728,6 +739,7 @@ REGISTER_OP("tile.part_min")
     });
 
 REGISTER_OP("tile.fmod")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise truncating remainder of two tiles with matching dtype and shape")
@@ -747,6 +759,7 @@ REGISTER_OP("tile.fmod")
     });
 
 REGISTER_OP("tile.muls")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise multiplication of tile and scalar")
@@ -760,6 +773,7 @@ REGISTER_OP("tile.muls")
     });
 
 REGISTER_OP("tile.adds")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise addition of tile and scalar")
@@ -773,6 +787,7 @@ REGISTER_OP("tile.adds")
     });
 
 REGISTER_OP("tile.divs")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise division of tile and scalar")
@@ -786,6 +801,7 @@ REGISTER_OP("tile.divs")
     });
 
 REGISTER_OP("tile.subs")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise subtraction of tile and scalar")
@@ -799,6 +815,7 @@ REGISTER_OP("tile.subs")
     });
 
 REGISTER_OP("tile.rems")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .set_description("Element-wise remainder (modulo) of tile and scalar")
     .add_argument("lhs", "Tile (TileType)")
@@ -815,6 +832,7 @@ REGISTER_OP("tile.rems")
     });
 
 REGISTER_OP("tile.fmods")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise truncating remainder of tile and scalar with matching dtype")
@@ -831,6 +849,7 @@ REGISTER_OP("tile.fmods")
     });
 
 REGISTER_OP("tile.shl")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise bitwise left shift of two tiles with broadcasting")
@@ -845,6 +864,7 @@ REGISTER_OP("tile.shl")
     });
 
 REGISTER_OP("tile.shls")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise bitwise left shift of tile and scalar")
@@ -858,6 +878,7 @@ REGISTER_OP("tile.shls")
     });
 
 REGISTER_OP("tile.shr")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise bitwise right shift of two tiles with broadcasting")
@@ -872,6 +893,7 @@ REGISTER_OP("tile.shr")
     });
 
 REGISTER_OP("tile.shrs")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise bitwise right shift of tile and scalar")
@@ -885,6 +907,7 @@ REGISTER_OP("tile.shrs")
     });
 
 REGISTER_OP("tile.maximums")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise maximum of tile and scalar")
@@ -898,6 +921,7 @@ REGISTER_OP("tile.maximums")
     });
 
 REGISTER_OP("tile.minimums")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise minimum of tile and scalar")
@@ -911,6 +935,7 @@ REGISTER_OP("tile.minimums")
     });
 
 REGISTER_OP("tile.and")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise bitwise AND of two tiles with matching dtype and shape")
@@ -925,6 +950,7 @@ REGISTER_OP("tile.and")
     });
 
 REGISTER_OP("tile.ands")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise bitwise AND of tile and scalar")
@@ -939,6 +965,7 @@ REGISTER_OP("tile.ands")
     });
 
 REGISTER_OP("tile.or")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise bitwise OR of two tiles with matching dtype and shape")
@@ -953,6 +980,7 @@ REGISTER_OP("tile.or")
     });
 
 REGISTER_OP("tile.ors")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise bitwise OR of tile and scalar")
@@ -1135,6 +1163,7 @@ TypePtr DeduceTileOpCarryScalarType(const std::vector<ExprPtr>& args,
 }
 
 REGISTER_OP("tile.xor")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .set_description("Element-wise bitwise XOR of two tiles using an explicit scratch tile")
     .add_argument("lhs", "Left-hand side tile (TileType)")
@@ -1151,6 +1180,7 @@ REGISTER_OP("tile.xor")
     });
 
 REGISTER_OP("tile.xors")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .set_description("Element-wise bitwise XOR of tile and scalar")
     .add_argument("lhs", "Tile (TileType)")
@@ -1230,6 +1260,7 @@ TypePtr DeduceTilePreluType(const std::vector<ExprPtr>& args,
 }
 
 REGISTER_OP("tile.prelu")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .set_description("Element-wise parametric ReLU of a tile with slope tile and temporary buffer")
     .add_argument("tile", "Input tile (TileType)")
@@ -1247,6 +1278,7 @@ REGISTER_OP("tile.prelu")
     });
 
 REGISTER_OP("tile.addc")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise carry addition (src0 + src1 + carry)")
@@ -1266,6 +1298,7 @@ REGISTER_OP("tile.addc")
     });
 
 REGISTER_OP("tile.subc")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise carry subtraction (src0 - src1 + carry)")
@@ -1285,6 +1318,7 @@ REGISTER_OP("tile.subc")
     });
 
 REGISTER_OP("tile.addsc")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise scalar carry addition (src0 + scalar + carry)")
@@ -1303,6 +1337,7 @@ REGISTER_OP("tile.addsc")
     });
 
 REGISTER_OP("tile.subsc")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise scalar carry subtraction (src0 - scalar + carry)")
@@ -1321,6 +1356,7 @@ REGISTER_OP("tile.subsc")
     });
 
 REGISTER_OP("tile.lrelu")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise leaky ReLU of a tile with scalar slope (max(x, slope*x))")
@@ -1376,6 +1412,7 @@ TypePtr DeduceTileSelType(const std::vector<ExprPtr>& args,
 }
 
 REGISTER_OP("tile.sel")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .set_description(
         "Per-element selection between two tiles using a predicate mask tile. "
@@ -1472,6 +1509,7 @@ TypePtr DeduceTileSelsType(const std::vector<ExprPtr>& args,
 }
 
 REGISTER_OP("tile.sels")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description(
@@ -1538,6 +1576,7 @@ TypePtr DeduceTileCmpType(const std::vector<ExprPtr>& args,
 }
 
 REGISTER_OP("tile.cmp")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise comparison of two tiles (returns a packed predicate mask tile)")
@@ -1553,6 +1592,7 @@ REGISTER_OP("tile.cmp")
     });
 
 REGISTER_OP("tile.cmps")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Element-wise comparison of tile and scalar (returns a packed predicate mask tile)")
@@ -1684,6 +1724,7 @@ TypePtr DeduceTileSelectType(const std::vector<ExprPtr>& args,
 }
 
 REGISTER_OP("tile.select")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description(
@@ -1706,6 +1747,7 @@ REGISTER_OP("tile.select")
     });
 
 REGISTER_OP("tile.fillpad")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .set_description("Fill destination tile with source tile data and pad remaining elements")
     .add_argument("tile", "Input tile (TileType)")
@@ -1743,6 +1785,7 @@ REGISTER_OP("tile.fillpad")
     });
 
 REGISTER_OP("tile.fillpad_inplace")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .set_description("Fill padding elements of input tile in place with specified pad value")
     .add_argument("tile", "Input tile (TileType)")
@@ -1780,6 +1823,7 @@ REGISTER_OP("tile.fillpad_inplace")
     });
 
 REGISTER_OP("tile.fillpad_expand")
+    .deterministic_memory_effects()
     .set_op_category("TileOp")
     .functional_execution_memory_access()
     .set_description("Copy a smaller source tile into a larger destination tile, padding the remainder")

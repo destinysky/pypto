@@ -268,8 +268,11 @@ class DistributedCompiledProgram:
         except (ValueError, TypeError):
             _remove_meta(self._output_dir, _DISTRIBUTED_META_FILENAME)
             return
+        from .replay_analysis import analyze_replay_effects  # noqa: PLC0415
+
         dc = self._distributed_config
         meta = {
+            "recovery_effects": analyze_replay_effects(self._program),
             "schema": _META_SCHEMA,
             "supported_execution_modes": self.execution_capabilities.record(),
             "params": [_param_info_to_dict(p) for p in param_infos],
@@ -568,8 +571,8 @@ class DistributedCompiledProgram:
                 :class:`~pypto.runtime.ReadOnlyHostTensor` when the backing is
                 shared but not writable, which makes ``copy_from`` into it raise
                 instead of faulting in the forked child.
-            operator_recovery: Opt-in local A5 SDMA recovery contract. Names
-                replay-safe chip functions; groups matching rank submissions
+            operator_recovery: Opt-in automatic local A5 SDMA recovery policy.
+                Uses compiler-derived effects, groups matching rank submissions
                 and delegates failure handling to Simpler. Requires transient
                 domains and no host callbacks. Defaults to disabled.
             startup_timeout_s: Optional positive finite bound, in seconds, for

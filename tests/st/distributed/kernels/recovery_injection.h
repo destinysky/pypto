@@ -1,6 +1,8 @@
 /* Copyright (c) PyPTO Contributors.
  * Licensed under CANN Open Software License Agreement Version 2.0.
  */
+#pragma once
+
 #ifndef __gm__
 #define __gm__
 #endif
@@ -14,15 +16,16 @@
 
 using namespace pto;
 
-extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
-    auto *flags = reinterpret_cast<__gm__ Tensor *>(args[0]);
-    auto *stats = reinterpret_cast<__gm__ Tensor *>(args[1]);
-    auto *comm = reinterpret_cast<__gm__ CommContext *>(args[3]);
-    const uint32_t phase = static_cast<uint32_t>(args[4]);
-    const uint32_t mode = static_cast<uint32_t>(args[5]);
+static inline __aicore__ __attribute__((always_inline)) bool inject_recovery_fault(
+    __gm__ int64_t *args, int flags_index, int stats_index, int context_index, int mode_index, uint32_t phase) {
+    auto *flags = reinterpret_cast<__gm__ Tensor *>(args[flags_index]);
+    auto *stats = reinterpret_cast<__gm__ Tensor *>(args[stats_index]);
+    auto *comm = reinterpret_cast<__gm__ CommContext *>(args[context_index]);
+    const uint32_t mode = static_cast<uint32_t>(args[mode_index]);
     AsyncCtx ctx = get_async_ctx(args);
     Tile<TileType::Vec, uint8_t, 1, SDMA_SCRATCH_ALIGNMENT> scratch;
-    TASSIGN(scratch, 0x0);
+    // Test kernels use less than 4 KiB of UB; injection owns a separate region.
+    TASSIGN(scratch, 0x20000);
     pto::comm::sdma::detail::UbTmpBuf tmp{};
     pto::comm::sdma::detail::MakeTmpBufferFromTile(scratch, tmp);
     auto *local = reinterpret_cast<__gm__ uint8_t *>(flags->buffer.addr + flags->start_offset);
@@ -41,7 +44,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         SetValue<uint32_t>(evidence + stage * 4, tmp, 0, count);
         SetValue<uint32_t>(evidence + (stage + 3) * 4, tmp, 0, order == expected ? 1 : 0);
         SetValue<uint32_t>(local + 640, tmp, 0, stage + 1);
-        return;
+        return false;
     }
     uint32_t epoch = GetValue<uint32_t>(local + 516, tmp);
     if (phase == 0) {
@@ -52,7 +55,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         SetValue<uint32_t>(evidence + 16, tmp, 0, order == 1 ? 1 : 0);
         if (comm->rankId == 0) {
             save_expected_notification_counter(ctx, local, epoch);
-            return;
+            return false;
         }
     } else {
         if (comm->rankId == 0 && mode && epoch == 1) {
@@ -60,10 +63,10 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
             // publication. Fail before publication so framework STOP is needed.
             pto2::detail::defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
             pto2::detail::defer_flush(ctx);
-            return;
+            return true;
         }
         SetValue<uint32_t>(local + 640, tmp, 0, 2);
-        if (comm->rankId != 0) return;
+        if (comm->rankId != 0) return false;
     }
     SetValue<uint32_t>(local + 64, tmp, 0, epoch);
     const uint64_t offset = reinterpret_cast<uint64_t>(local) - comm->windowsIn[comm->rankId];
@@ -76,4 +79,5 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     send_request_entry(ctx, SdmaTput(destination, source, scratch,
                                    reinterpret_cast<__gm__ uint8_t *>(comm->workSpace)));
     if (phase == 0) save_expected_notification_counter(ctx, local + 128, epoch);
+    return false;
 }
