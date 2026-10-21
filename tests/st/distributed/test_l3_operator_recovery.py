@@ -417,7 +417,7 @@ def urma_program(
 
 @pytest.mark.timeout(240)
 @pytest.mark.skipif(not _urma_enabled(), reason="URMA recovery requires the URMA runtime build")
-@pytest.mark.parametrize("mode", ["healthy", "transient"])
+@pytest.mark.parametrize("mode", ["baseline", "healthy", "transient"])
 def test_urma_program_continues(test_config, device_ids, mode, capfd, caplog, monkeypatch, tmp_path):
     if test_config.platform != "a5" or len(device_ids) != 2:
         pytest.skip("URMA recovery requires exactly two local A5 devices")
@@ -443,7 +443,8 @@ def test_urma_program_continues(test_config, device_ids, mode, capfd, caplog, mo
     wrappers = list(compiled.output_dir.glob("next_levels/urma_exchange/kernels/**/*.cpp"))
     assert any("send_request_entry(ctx, UrmaTget(" in path.read_text() for path in wrappers)
     observed = gate_graph_builder(monkeypatch) if fault else []
-    with compiled.prepare(operator_recovery=OperatorRecoveryConfig()) as runtime:
+    recovery = None if mode == "baseline" else OperatorRecoveryConfig()
+    with compiled.prepare(operator_recovery=recovery) as runtime:
         runtime(x, y, stats, fault)
     torch.testing.assert_close(y, x.flip(0) + 4, rtol=0, atol=0)
     expected = torch.tensor([1, 1 + fault, 1, 1, 1, 1, 0, 0], dtype=torch.int32).repeat(2, 1)

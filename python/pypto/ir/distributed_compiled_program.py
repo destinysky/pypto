@@ -571,7 +571,7 @@ class DistributedCompiledProgram:
                 :class:`~pypto.runtime.ReadOnlyHostTensor` when the backing is
                 shared but not writable, which makes ``copy_from`` into it raise
                 instead of faulting in the forked child.
-            operator_recovery: Opt-in automatic local A5 SDMA recovery policy.
+            operator_recovery: Opt-in automatic local A5 SDMA/URMA recovery policy.
                 Uses compiler-derived effects, groups matching rank submissions
                 and delegates failure handling to Simpler. Requires transient
                 domains and no host callbacks. Defaults to disabled.
