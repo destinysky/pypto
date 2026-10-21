@@ -43,6 +43,12 @@
 
 ## Notify & Wait：信号握手
 
+本地 A5 URMA 的 `pld.tensor.get_async(dst, peer=peer, src=src)` 在独立顶层
+`pl.at(CORE_GROUP)` task 中注册 GET。两个参数均为已注册的连续完整 window，
+静态形状相同，总大小不超过 256 MiB。目标数据在 task 完成时就绪，而非 kernel 的下一行。
+完成语义、后端选择及恢复约束见[算子恢复](../execution/02-operator-recovery.md)。
+同步 `get` 及其 staging 实现保持不变。
+
 最底层的同步原语。每个 rank 写入对端信号槽，然后阻塞直到自己的槽被写入。
 
 ```python

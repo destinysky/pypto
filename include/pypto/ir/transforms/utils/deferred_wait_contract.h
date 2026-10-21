@@ -45,7 +45,7 @@ namespace outline_utils {
 
    protected:
     void VisitExpr_(const CallPtr& call) override {
-      if (IsOp(call, "pld.system.defer_wait")) found = true;
+      if (IsOp(call, "pld.system.defer_wait") || IsOp(call, "pld.tensor.get_async")) found = true;
       IRVisitor::VisitExpr_(call);
     }
   };
@@ -76,6 +76,7 @@ inline constexpr int64_t kMaxDeferredConditionsPerWaiter = 64;
 /**
  * @brief Validate the dedicated deferred-waiter kernel body contract.
  *
+ * Async GET tasks use the same budget and forbid in-kernel payload consumers.
  * A waiter may use scalar expressions and sequential scalar control flow to
  * compute/register conditions, but must not perform payload, cache, or other
  * communication work.  Once a defer_wait registration has executed on a
@@ -94,6 +95,7 @@ class DeferredWaitContractValidator {
     // registered. Control flow, pure scalar bookkeeping, and further
     // registrations are safe; tensor reads and continuation work are not.
     bool safe_after_registration = true;
+    bool has_async_get = false;
   };
 
   static Result Validate(const StmtPtr& body, const Span& span) {
@@ -110,6 +112,9 @@ class DeferredWaitContractValidator {
     CHECK_SPAN(result.static_max_count <= kMaxDeferredConditionsPerWaiter, span)
         << "deferred waiter supports at most " << kMaxDeferredConditionsPerWaiter
         << " conditions, but may statically register " << result.static_max_count;
+    CHECK_SPAN(!result.has_async_get || result.static_max_count <= 1, span)
+        << "pld.tensor.get_async requires one transfer in a dedicated task; "
+           "put further transfers or conditions in separate dependent tasks";
     return result;
   }
 
@@ -135,7 +140,7 @@ class DeferredWaitContractValidator {
     }
     if (auto assign = As<AssignStmt>(stmt)) {
       auto call = As<Call>(assign->value_);
-      if (call && IsOp(call, "pld.system.defer_wait")) {
+      if (call && (IsOp(call, "pld.system.defer_wait") || IsOp(call, "pld.tensor.get_async"))) {
         CHECK_SPAN(false, stmt->span_)
             << "pld.system.defer_wait is side-effect-only and must be used as a standalone statement";
       }
@@ -185,6 +190,7 @@ class DeferredWaitContractValidator {
       auto else_result = branch->else_body_.has_value() ? ValidateStmt(*branch->else_body_) : Result{};
       Result result;
       result.has_deferred_wait = then_result.has_deferred_wait || else_result.has_deferred_wait;
+      result.has_async_get = then_result.has_async_get || else_result.has_async_get;
       result.static_max_count = std::max(then_result.static_max_count, else_result.static_max_count);
       result.safe_after_registration =
           then_result.safe_after_registration && else_result.safe_after_registration;
@@ -213,6 +219,10 @@ class DeferredWaitContractValidator {
 
   [[nodiscard]] Result ValidateCall(const CallPtr& call, const Span& span) const {
     CHECK_SPAN(call, span) << "deferred waiter contains a non-call side-effect statement";
+    if (IsOp(call, "pld.tensor.get_async")) {
+      static_cast<void>(ValidateScalarExpr(call->args_[1], span, /*allow_tensor_read=*/false));
+      return Result{true, 1, true, true};
+    }
     if (IsOp(call, "pld.system.defer_wait")) {
       INTERNAL_CHECK_SPAN(call->args_.size() == 3, span)
           << "Internal error: pld.system.defer_wait argument count was not verified";
@@ -289,6 +299,7 @@ class DeferredWaitContractValidator {
 
   static void Merge(Result* dst, const Result& src) {
     dst->has_deferred_wait = dst->has_deferred_wait || src.has_deferred_wait;
+    dst->has_async_get = dst->has_async_get || src.has_async_get;
     dst->static_max_count += src.static_max_count;
     dst->safe_after_registration = dst->safe_after_registration && src.safe_after_registration;
   }

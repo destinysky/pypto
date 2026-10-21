@@ -811,6 +811,54 @@ static std::string MakeDeferWaitCodegenPTO(const CallPtr& op, codegen::CodegenBa
   return "";
 }
 
+static std::string MakeGetAsyncCodegenPTO(const CallPtr& op, codegen::CodegenBase& base) {
+  auto& cg = AsPto(base);
+  CHECK_SPAN(cg.GetBackendHandler()->GetPtoTargetArch() == "a5", op->span_)
+      << "pld.tensor.get_async currently requires A5 URMA";
+  auto dst = ResolveDistTensorBinding(op->args_[0], cg, "pld.tensor.get_async");
+  auto src = ResolveDistTensorBinding(op->args_[2], cg, "pld.tensor.get_async");
+  for (const auto& binding : {dst, src}) {
+    const auto& view = binding.type->tensor_view_;
+    if (!view.has_value()) continue;
+    CHECK_SPAN(view->layout == ir::TensorLayout::ND, op->span_)
+        << "pld.tensor.get_async requires contiguous ND windows";
+    CHECK_SPAN((view->stride.empty() || view->stride.size() == binding.type->shape_.size()) &&
+                   (view->valid_shape.empty() || view->valid_shape.size() == binding.type->shape_.size()),
+               op->span_)
+        << "pld.tensor.get_async window view rank must match its shape";
+    int64_t stride = 1;
+    for (size_t i = binding.type->shape_.size(); i-- > 0;) {
+      const auto extent = As<ir::ConstInt>(binding.type->shape_[i]);
+      CHECK_SPAN(extent, op->span_) << "pld.tensor.get_async requires static window extents";
+      if (!view->stride.empty()) {
+        auto step = As<ir::ConstInt>(view->stride[i]);
+        CHECK_SPAN(step && step->value_ == stride, op->span_)
+            << "pld.tensor.get_async requires contiguous ND windows";
+      }
+      if (!view->valid_shape.empty()) {
+        auto valid = As<ir::ConstInt>(view->valid_shape[i]);
+        CHECK_SPAN(valid && valid->value_ == extent->value_, op->span_)
+            << "pld.tensor.get_async requires full window views";
+      }
+      stride *= extent->value_;
+    }
+  }
+  int64_t count = 1;
+  for (const auto& dim : dst.type->shape_) count *= As<ir::ConstInt>(dim)->value_;
+  const auto dst_index = cg.GetOrEmitConstant(cg.GetDirectTensorArgumentIndex(dst.var), DataType::INT32);
+  const auto src_index = cg.GetOrEmitConstant(cg.GetDirectTensorArgumentIndex(src.var), DataType::INT32);
+  const auto elements = cg.GetOrEmitConstant(count, DataType::INT64);
+  const auto width =
+      cg.GetOrEmitConstant(static_cast<int64_t>(dst.type->dtype_.GetBit() / 8), DataType::INT64);
+  const auto raw = cg.GetDeferredCompletionRawArgsSSA();
+  INTERNAL_CHECK(!raw.empty()) << "async GET needs raw dispatch args";
+  const auto adapter = cg.RegisterAsyncGetAdapter();
+  cg.Emit("func.call @" + adapter + "(" + raw + ", " + dst_index + ", " + src_index + ", " + dst.ctx_ssa +
+          ", " + src.ctx_ssa + ", " + cg.GetExprAsCode(op->args_[1]) + ", " + elements + ", " + width +
+          ") : (!pto.ptr<i64>, i32, i32, !pto.ptr<i64>, !pto.ptr<i64>, i32, i64, i64) -> ()");
+  return "";
+}
+
 // pld.tile.put(dst, peer, src, stage[, dst_offsets, src_offsets, shape],
 //              *, atomic) - synchronous cross-rank bulk write of the local
 // slice `src` into the peer rank's slice of `dst`. `stage` is a VEC scratch
@@ -1199,6 +1247,9 @@ void RegisterDistributedOps(Backend& backend, const std::unordered_set<std::stri
     cg.Emit(rn + " = arith.trunci " + rn_i64 + " : i64 to i32");
     cg.SetCurrentExprValue(rn);
     return "";
+  });
+  reg("pld.tensor.get_async", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeGetAsyncCodegenPTO(op, codegen);
   });
   reg("pld.tile.get",
       [](const ir::CallPtr& op, codegen::CodegenBase& codegen) { return MakeGetCodegenPTO(op, codegen); });

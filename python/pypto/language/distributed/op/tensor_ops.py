@@ -487,6 +487,18 @@ def put(
     )
 
 
+def get_async(dst: DistributedTensor, peer: IntLike, src: DistributedTensor) -> Call:
+    """Submit a URMA GET whose destination becomes ready at task completion.
+
+    Both operands must be direct, contiguous, static registered window parameters
+    from the same domain. Use one GET per dedicated single-block CORE_GROUP scope; payload
+    consumers belong in a subsequent task. The current A5 implementation accepts
+    remote peers and full slices of at most 256 MiB. Existing ``get`` remains
+    synchronous and retains its MTE staging implementation.
+    """
+    return _ir_tensor.get_async(_unwrap(dst), _unwrap(peer), _unwrap(src))
+
+
 def get(
     dst: DistributedTensor | Tensor,
     peer: IntLike,
@@ -1102,6 +1114,7 @@ __all__ = [
     "barrier",
     "broadcast",
     "get",
+    "get_async",
     "put",
     "remote_store",
     "reduce_scatter",

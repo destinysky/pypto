@@ -39,6 +39,8 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
@@ -89,6 +91,7 @@ std::string DistributedCodegen::Generate(const ir::ProgramPtr& program) {
   host_orch_var_defs_.clear();
   unwrap_hoisted_var_refs_ = false;
   tuple_element_tensors_.clear();
+  returned_tensor_params_.clear();
   tuple_element_task_handles_.clear();
   emitted_builtin_variants_.clear();
   builtin_next_level_specs_.clear();
@@ -606,7 +609,17 @@ void DistributedCodegen::VisitStmt_(const ir::CommDomainScopeStmtPtr& op) {
   emitter_.DecreaseIndent();
   emitter_.EmitLine(") as " + handle_var + ":");
   emitter_.IncreaseIndent();
-  emitter_.EmitLine("_bind_recovery_domain(orch, " + handle_var + ")");
+  class AsyncGetFinder : public ir::IRVisitor {
+   public:
+    bool found = false;
+    void VisitExpr_(const ir::CallPtr& call) override {
+      if (ir::IsOp(call, "pld.tensor.get_async")) found = true;
+      ir::IRVisitor::VisitExpr_(call);
+    }
+  } finder;
+  for (const auto& [gvar, func] : program_->functions_) finder.VisitStmt(func->body_);
+  emitter_.EmitLine("_bind_recovery_domain(orch, " + handle_var +
+                    (finder.found ? ", required_engine=\"URMA\")" : ")"));
 
   // The per-rank comm ordering token for this scope is allocated in
   // ``_alloc_intermediates`` (see EmitAllocIntermediates), NOT here: it must
@@ -707,6 +720,34 @@ bool DistributedCodegen::TryEmitHierarchyCall(const ir::ExprPtr& expr) {
               << "' has level = '" << ir::LevelToString(callee_level) << "', role = '"
               << ir::RoleToString(callee_role) << "'.";
   return false;  // unreachable
+}
+
+const std::vector<size_t>& DistributedCodegen::ReturnedTensorParameters(const ir::FunctionPtr& callee) {
+  auto cached = returned_tensor_params_.find(callee->name_);
+  if (cached != returned_tensor_params_.end()) return cached->second;
+
+  auto explicit_returns = ir::return_lineage::ExplicitReturnedParamIndices(callee);
+  if (explicit_returns.empty() || std::any_of(explicit_returns.begin(), explicit_returns.end(),
+                                              [](const auto& index) { return !index.has_value(); })) {
+    // Distributed orchestration wrappers can return SSA aliases of inner calls;
+    // their codegen preconditions do not require ReturnParamsExplicit.
+    explicit_returns = ir::return_lineage::ReturnedParamIndices(callee, program_);
+  }
+  std::vector<size_t> parameters;
+  if (!explicit_returns.empty() && std::all_of(explicit_returns.begin(), explicit_returns.end(),
+                                               [](const auto& index) { return index.has_value(); })) {
+    for (const auto& index : explicit_returns) parameters.push_back(index.value());
+  } else {
+    // Direct codegen callers may supply wrappers whose returns are not yet
+    // canonicalized to parameters. Preserve their direction-based convention.
+    for (size_t i = 0; i < callee->param_directions_.size(); ++i) {
+      if (callee->param_directions_[i] == ir::ParamDirection::Out ||
+          callee->param_directions_[i] == ir::ParamDirection::InOut) {
+        parameters.push_back(i);
+      }
+    }
+  }
+  return returned_tensor_params_.emplace(callee->name_, std::move(parameters)).first->second;
 }
 
 void DistributedCodegen::VisitStmt_(const ir::AssignStmtPtr& op) {
@@ -1065,8 +1106,26 @@ void DistributedCodegen::VisitExpr_(const ir::ConstBoolPtr& op) {
 // Call-site lowering
 // ========================================================================
 
-void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::FunctionPtr& callee,
+void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::FunctionPtr& original_callee,
                                           const ir::SubmitPtr& submit) {
+  auto callee = original_callee;
+  // Unannotated JIT wrappers retain typed returns in their body while their
+  // declared signature is empty. Match the parser's inferred call result rather
+  // than leaving an earlier tuple temporary's aliases in the map.
+  if (callee->return_types_.empty() && callee->body_) {
+    auto ret = ir::return_lineage::FindFirstReturn(callee->body_);
+    if (ret && !ret->value_.empty()) {
+      std::vector<ir::TypePtr> types;
+      for (const auto& value : ret->value_) types.push_back(value->GetType());
+      if (types.size() == 1) {
+        if (auto tuple = ir::As<ir::TupleType>(types.front())) types = tuple->types_;
+      }
+      callee = std::make_shared<ir::Function>(callee->name_, callee->params_, callee->param_directions_,
+                                              types, callee->body_, callee->span_, callee->func_type_,
+                                              callee->level_, callee->role_, callee->attrs_,
+                                              callee->requires_runtime_binding_, callee->ir_stage_);
+    }
+  }
   bool is_sub = IsSubWorker(callee);
   std::string ta_var = "_ta_" + std::to_string(task_args_counter_++);
 
@@ -1352,34 +1411,27 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
       // Do NOT emit a tensors["target"] alias here — the individual
       // TupleGetItemExpr unpacking statements handle per-element aliasing.
       int out_idx = 0;
-      for (size_t i = 0; i < callee->param_directions_.size() && i < call->args_.size(); ++i) {
-        if (callee->param_directions_[i] == ir::ParamDirection::Out ||
-            callee->param_directions_[i] == ir::ParamDirection::InOut) {
-          VisitExpr(call->args_[i]);
-          std::string out_arg = current_expr_value_;
-          current_expr_value_ = "";
-          tuple_element_tensors_[std::make_pair(target, out_idx)] = out_arg;
-          ++out_idx;
-        }
+      for (size_t i : ReturnedTensorParameters(callee)) {
+        INTERNAL_CHECK_SPAN(i < call->args_.size(), call->span_) << "Returned parameter has no call argument";
+        VisitExpr(call->args_[i]);
+        std::string out_arg = current_expr_value_;
+        current_expr_value_ = "";
+        tuple_element_tensors_[std::make_pair(target, out_idx)] = out_arg;
+        ++out_idx;
       }
       if (submit && out_idx == 0) {
         tuple_element_tensors_[std::make_pair(target, 0)] = target;
       }
     } else if (!ir::As<ir::DistributedTensorType>(call->GetType())) {
-      // Single return: alias target to the first Out/InOut parameter tensor.
-      // Comm windows resolve through window_buffer_, not the tensors dict, so
-      // a DistributedTensor return gets no alias and window-typed params are
-      // skipped when picking the aliased tensor.
-      for (size_t i = 0; i < callee->param_directions_.size() && i < call->args_.size(); ++i) {
-        if (callee->param_directions_[i] == ir::ParamDirection::Out ||
-            callee->param_directions_[i] == ir::ParamDirection::InOut) {
-          if (ir::As<ir::DistributedTensorType>(call->args_[i]->GetType())) continue;
-          VisitExpr(call->args_[i]);
-          std::string out_arg = current_expr_value_;
-          current_expr_value_ = "";
-          emitter_.EmitLine("tensors[\"" + target + "\"] = tensors[\"" + out_arg + "\"]");
-          break;
-        }
+      // Comm-window results resolve through window_buffer_, not the tensors dictionary.
+      for (size_t i : ReturnedTensorParameters(callee)) {
+        INTERNAL_CHECK_SPAN(i < call->args_.size(), call->span_) << "Returned parameter has no call argument";
+        if (ir::As<ir::DistributedTensorType>(call->args_[i]->GetType())) continue;
+        VisitExpr(call->args_[i]);
+        std::string out_arg = current_expr_value_;
+        current_expr_value_ = "";
+        emitter_.EmitLine("tensors[\"" + target + "\"] = tensors[\"" + out_arg + "\"]");
+        break;
       }
     }
   }

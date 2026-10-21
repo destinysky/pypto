@@ -47,6 +47,7 @@ from pypto._function_attrs import (
 from pypto.backend._ptoas_locate import PTOAS_RELATIVE_PATHS as _PTOAS_RELATIVE_PATHS
 from pypto.backend._ptoas_locate import find_ptoas_binary as _find_ptoas_binary
 from pypto.backend._ptoas_preprocess import preprocess_ptoas_output as _preprocess_ptoas_output
+from pypto.backend._urma_adapter import URMA_GET_ADAPTER as _URMA_GET_ADAPTER
 from pypto.compile_profiling import CompileProfiler, StageRecord
 from pypto.pypto_core import DataType
 from pypto.pypto_core import backend as _backend_core
@@ -677,7 +678,9 @@ _AIV_FIFO_ENDPOINT_OPS = frozenset(
     }
 )
 _SDMA_WORKSPACE_OPS = frozenset({_ir_core.get_op("prefetch.make_context").name})
-_DEFERRED_COMPLETION_OPS = frozenset({_ir_core.get_op("pld.system.defer_wait").name})
+_DEFERRED_COUNTER_OPS = frozenset({_ir_core.get_op("pld.system.defer_wait").name})
+_ASYNC_GET_OPS = frozenset({_ir_core.get_op("pld.tensor.get_async").name})
+_DEFERRED_COMPLETION_OPS = _DEFERRED_COUNTER_OPS | _ASYNC_GET_OPS
 
 
 def _function_uses_ops(func: _ir_core.Function, op_names: frozenset[str]) -> bool:
@@ -1096,7 +1099,14 @@ def _generate_kernel_wrapper(
         "}\n"
     )
 
-    deferred_completion_adapter = _DEFERRED_COMPLETION_ADAPTER if func_uses_deferred_completion else ""
+    deferred_completion_adapter = (
+        _DEFERRED_COMPLETION_ADAPTER if _function_uses_ops(func, _DEFERRED_COUNTER_OPS) else ""
+    )
+    if _function_uses_ops(func, _ASYNC_GET_OPS):
+        header += (
+            '\n#include "backend/urma/urma_completion_kernel.h"\n#include "platform_comm/comm_context.h"\n'
+        )
+        deferred_completion_adapter += _URMA_GET_ADAPTER
     return (
         f"{header}\n{deferred_completion_adapter}{fifo_lane_arg_bridge}"
         f"// --- ptoas-generated code ---\n{ptoas_body}\n{fifo_lane_arg_cleanup}{wrapper_func}"
@@ -2125,6 +2135,10 @@ def _generate_single_chip(
     emitted_incore_funcs = [
         func for members in groups.values() for func in members if not _skips_pto_codegen(func)
     ] + [func for func in ungrouped if not _skips_pto_codegen(func)]
+    if runtime != _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER and any(
+        _function_uses_ops(func, _ASYNC_GET_OPS) for func in emitted_incore_funcs
+    ):
+        raise ValueError("pld.tensor.get_async requires the A5 tensormap_and_ringbuffer runtime")
 
     # External kernels are referenced at their original path in the manifest
     # (kept beside their sibling sources so relative #include "../..." resolve),

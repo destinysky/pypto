@@ -1,6 +1,6 @@
 # 本地 A5 算子恢复
 
-预配置的分布式程序可启用 Simpler 的 SDMA 自动恢复：
+预配置的分布式程序可启用 Simpler 的 SDMA 或 URMA 自动恢复：
 
 ```python
 from pypto.runtime import OperatorRecoveryConfig
@@ -36,7 +36,7 @@ PyPTO 从生成代码推导运行、算子身份、参与 rank 和 window/contex
 时维持原有派发路径。私有 GM 读取若缺少已初始化区间证明，同样拒绝重执行。
 
 故障发生后，Simpler 冻结后续派发，对当前 attempt 的全体成员发送带身份校验的 STOP，
-收集退役证明，校验重执行资格，恢复 SDMA 资源并重新绑定参数，然后重执行并提交失败组。
+收集退役证明，校验重执行资格，恢复所选传输后端并重新绑定参数，然后重执行并提交失败组。
 成功提交后释放原图后继。应用不需手动 STOP 或重新派发。资格拒绝、恢复失败或预算耗尽
 均进入既有终止流程。
 
@@ -44,10 +44,26 @@ PyPTO 从生成代码推导运行、算子身份、参与 rank 和 window/contex
 派发、各 rank 相同 CHIP 函数序列及共享调用配置。不支持 host callback、sub-worker、
 持久域、host 直接派发 builtin collective、多程序 worker 和跨机执行。builtin collective
 可以位于 CHIP 函数内部，但未知副作用不能重执行。window 来源的 context 携带绑定信息，
-不透明 context 不可恢复。接口不根据故障码选择传输后端；URMA/CCU 尚待后端实现和验证。
+不透明 context 不可恢复。接口不根据故障码选择传输后端；SDMA 与 URMA 共用协调合同，CCU 恢复尚未实现。
+
+本地 A5 URMA 的 `pld.tensor.get_async(dst, peer=peer, src=src)` 提交真实 URMA GET，
+并将 CQE 注册到 Simpler。两个 tensor 必须是同一通信域的直接 window 参数，形状相同、
+静态正维度、完整连续、元素可按字节寻址，总大小不超过 256 MiB；peer 必须是远端 rank。
+每个独立的顶层 `pl.at(CORE_GROUP)` scope 只提交一次 GET，其 TaskId 在 CQE 成功后才完成。
+消费者位于有依赖的后续 task；同一 kernel 内提交后读取 payload 会被编译器拒绝。
+读写副作用与重执行安全性仍由编译器推导，无需人工声明。原同步 `get` 的 MTE staging
+实现不变，切换 URMA workspace 不会将同步 `get` 自动改写为 URMA。
+
+A5 当前每次构建选择一个 workspace 后端：URMA 使用
+`SIMPLER_ENABLE_PTO_URMA_WORKSPACE=ON`，默认 SDMA 使用 `OFF`。切换后必须重新构建，
+只修改执行时环境不能改变旧二进制。生成的 URMA host orchestration 在首次提交 task 前检查
+每个 rank 的实际通信域类型，未启用恢复时也检查。URMA 恢复先证明 PTO 已停止，再通过新鲜、
+成功的 CQE 排空原队列，最后提交并原址 rearm，保留 HCOMM/HCCL、注册窗口和队列身份。
+该流程不销毁 channel、不 reset device；缺少或错误 CQE 证据会返回恢复失败并进入终止路径。
+这些验证不宣称能够恢复物理链路损坏。
 
 `tests/st/distributed/test_l3_operator_recovery.py` 编译真实 PyPTO 程序：
-warmup → exchange → finish。业务计算和 SDMA GET 均从 IR 生成，没有人工安全声明。
+warmup → exchange → finish。业务计算和同步 GET 均从 IR 生成，没有人工安全声明。
 只有测试生成的 wrapper 包含故障注入与计数：peer 进入通知等待后报告异步 completion
 错误，随后由框架 STOP、恢复和重执行。测试校验 SDMA 数据、最终数值、执行次数和顺序。
 该测试不模拟物理网络损坏；正式代码不包含注入开关。
@@ -57,6 +73,12 @@ transient 用例在最后一个后继提交之前等待框架观察到故障，�
 `SUBMISSION_BINDING_CURRENT ... generation=2` 日志，分别证明构图期间已开始恢复和后续
 提交使用当前世代绑定。原有数值、执行次数和顺序断言仍必须通过。
 
-baseline/healthy 各在同一个 prepared worker 上执行四次，前者不启用恢复，后者启用。
+新增的 `test_urma_program_continues` 编译 `@pl.jit.host` 程序，业务 GET 从 IR 生成真实
+URMA 传输，仍验证 warmup → exchange → finish。transient 在 rank 0 发布 ready 通知前注入
+空地址 completion 条件，rank 1 必须由框架主动 STOP。这是软件 completion 合同错误，
+没有伪造硬件 CQE。必须通过数值、执行次数/顺序、原图继续、一次 replay/commit、CQE drain
+及通信身份保持断言。默认构建选择原 SDMA 用例，URMA 构建选择新增 URMA 用例。
+
+SDMA 的 baseline/healthy 各在同一个 prepared worker 上执行四次，前者不启用恢复，后者启用。
 `HEALTHY_DISPATCH_LATENCY` 输出去掉第一次预热后的三个 dispatch/wait 时间，排除编译和
 worker 初始化，包含通信域生命周期与数据拷贝。这是短时性能对比，不承诺零开销。

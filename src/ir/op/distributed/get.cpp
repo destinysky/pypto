@@ -178,6 +178,28 @@ TypePtr DeduceGetTileType(const std::vector<ExprPtr>& args,
   return GetUnknownType();
 }
 
+TypePtr DeduceGetAsyncType(const std::vector<ExprPtr>& args,
+                           const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  CHECK(args.size() == 3 && kwargs.empty())
+      << "pld.tensor.get_async requires (dst, peer, src) without attributes";
+  ValidateGetContract(args[0], args[1], args[2], "pld.tensor.get_async", true);
+  CHECK(As<DistributedTensorType>(args[0]->GetType()))
+      << "pld.tensor.get_async dst must be a registered DistributedTensor window";
+  auto peer = As<ScalarType>(args[1]->GetType());
+  CHECK(peer->dtype_ == DataType::INT32) << "pld.tensor.get_async peer must be INT32";
+  auto type = AsTensorTypeLike(args[0]->GetType());
+  CHECK(type->dtype_.GetBit() >= 8 && type->dtype_.GetBit() % 8 == 0)
+      << "pld.tensor.get_async requires byte-addressable element types";
+  int64_t bytes = type->dtype_.GetBit() / 8;
+  for (const auto& dim : type->shape_) {
+    auto extent = As<ConstInt>(dim);
+    CHECK(extent && extent->value_ > 0 && extent->value_ <= (256LL * 1024 * 1024) / bytes)
+        << "pld.tensor.get_async requires a positive static full slice of at most 256 MiB";
+    bytes *= extent->value_;
+  }
+  return GetUnknownType();
+}
+
 }  // namespace
 
 // ============================================================================
@@ -259,6 +281,19 @@ REGISTER_OP("pld.tile.get")
     .set_arg_effect(0, ArgEffect::Write)
     .set_write_channel(WriteChannel::Dma)
     .f_deduce_type(DeduceGetTileType);
+
+REGISTER_OP("pld.tensor.get_async")
+    .deterministic_memory_effects(true)
+    .set_description("Register a full-slice URMA read; destination is ready at task completion")
+    .set_op_category("DistributedOp")
+    .add_argument("dst", "Local registered DistributedTensor destination")
+    .add_argument("peer", "Remote rank (INT32)")
+    .add_argument("src", "Preserved peer DistributedTensor source")
+    .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
+    .no_memory_spec()
+    .set_arg_effect(0, ArgEffect::Write)
+    .set_write_channel(WriteChannel::Dma)
+    .f_deduce_type(DeduceGetAsyncType);
 
 }  // namespace ir
 }  // namespace pypto

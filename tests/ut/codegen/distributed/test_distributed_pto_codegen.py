@@ -47,6 +47,7 @@ import pytest
 from _pto_loc_common import strip_loc
 from pypto import DataType, backend, codegen, ir, passes
 from pypto.backend import BackendType
+from pypto.backend.pto_backend import _generate_kernel_wrapper
 from pypto.ir.builder import IRBuilder
 from pypto.ir.instruments import make_roundtrip_instrument
 from pypto.ir.op import tile as tile_ops
@@ -121,6 +122,78 @@ def test_ctx_arg_materialized_per_distributed_tensor():
     # body uses bind to %argK references). Two DistributedTensors → two ptr
     # declarations.
     assert header.count("!pto.ptr<i64>") == 2, header
+
+
+def test_async_get_generates_descriptor_bridge_and_deferred_completion():
+    """The generated read uses URMA MR offsets and a scheduler-owned CQE token."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend950)
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            src: pld.DistributedTensor[[1, 256], pl.FP32],
+            dst: pl.Out[pld.DistributedTensor[[1, 256], pl.FP32]],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            with pl.at(level=pl.Level.CORE_GROUP, name_hint="read_task"):
+                pld.tensor.get_async(dst, peer=peer, src=src)
+
+    outlined = passes.outline_incore_scopes()(passes.convert_to_ssa()(P))
+    optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(outlined)
+    kernel = next(func for func in optimized.functions.values() if func.func_type == pl.FunctionType.AIV)
+    mlir = codegen.PTOCodegen().generate(ir.Program([kernel], kernel.name, optimized.span))
+    assert "func.call @pypto_urma_get_completion(%__pypto_deferred_raw_args" in mlir
+    assert "pto.comm.tget(" not in mlir and "pto.comm.twait" not in mlir
+    assert mlir.count("func.func private @pypto_urma_get_completion") == 1
+    wrapper = _generate_kernel_wrapper(kernel, "")
+    assert "send_request_entry(ctx, UrmaTget(" in wrapper
+    assert "peer_mr_ptr<uint8_t>" in wrapper and "src->start_offset * width" in wrapper
+    assert "get_async_ctx" in wrapper
+    assert "event.Wait(" not in wrapper
+
+
+def test_async_get_rejects_same_kernel_payload_consumer():
+    """A consumer cannot run before the DMA event becomes terminal."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            src: pld.DistributedTensor[[1, 256], pl.FP32],
+            dst: pld.DistributedTensor[[1, 256], pl.FP32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                pld.tensor.get_async(dst, peer=peer, src=src)
+                value = pl.read(dst, [0, 0])
+                pl.write(dst, [0, 0], value)
+
+    with pytest.raises(Exception, match="after|registration-only"):
+        passes.outline_incore_scopes()(passes.convert_to_ssa()(P))
+
+
+def test_async_get_rejects_a_second_transfer_in_the_same_task():
+    """Do not permit an implicit DMA-to-DMA consumer inside a deferred task."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            src: pld.DistributedTensor[[1, 256], pl.FP32],
+            dst: pld.DistributedTensor[[1, 256], pl.FP32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                pld.tensor.get_async(dst, peer=peer, src=src)
+                pld.tensor.get_async(src, peer=peer, src=dst)
+
+    with pytest.raises(Exception, match="one transfer"):
+        passes.outline_incore_scopes()(passes.convert_to_ssa()(P))
 
 
 def test_defer_wait_registers_strided_counter_without_blocking_twait():

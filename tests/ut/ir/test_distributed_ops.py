@@ -2687,5 +2687,22 @@ def test_all_to_all_v_rejects_partial_valid_shape_target():
         ir.create_op_call("pld.tensor.all_to_all_v", args, {}, span)
 
 
+@pytest.mark.parametrize("case", ["plain-dst", "dynamic", "too-large", "sub-byte"])
+def test_async_get_rejects_unregistered_or_unsupported_regions(case):
+    span = ir.Span.unknown()
+    dtype = DataType.FP4 if case == "sub-byte" else DataType.FP32
+    extent = (
+        ir.Var("n", ir.ScalarType(DataType.INT32), span)
+        if case == "dynamic"
+        else ir.ConstInt(256 * 1024 * 1024 if case == "too-large" else 256, DataType.INDEX, span)
+    )
+    shape = [extent]
+    src = ir.Var("src", ir.DistributedTensorType(shape, dtype), span)
+    dst_type = ir.TensorType(shape, dtype) if case == "plain-dst" else ir.DistributedTensorType(shape, dtype)
+    dst = ir.Var("dst", dst_type, span)
+    with pytest.raises(Exception, match="registered|static|byte-addressable"):
+        dist_tensor_ops.get_async(dst, 1, src, span=span)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -189,6 +189,17 @@ def put(  # noqa: PLR0913
     return _ir_core.create_op_call("pld.tensor.put", args, attrs, actual_span)
 
 
+def get_async(dst: Expr, peer: int | Expr, src: Expr, *, span: Span | None = None) -> Call:
+    """Read a peer's registered window; readiness is deferred to task completion.
+
+    Currently supports local A5 URMA, static contiguous full slices up to 256 MiB.
+    Use a dedicated CORE_GROUP scope and a dependent task for consumers.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)
+    return _ir_core.create_op_call("pld.tensor.get_async", [dst, peer_expr, src], {}, actual_span)
+
+
 def get(
     dst: Expr,
     peer: int | Expr,
@@ -524,6 +535,7 @@ __all__ = [
     "barrier",
     "broadcast",
     "get",
+    "get_async",
     "put",
     "remote_store",
     "reduce_scatter",

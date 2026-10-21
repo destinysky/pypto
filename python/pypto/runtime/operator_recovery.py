@@ -5,6 +5,7 @@
 import itertools
 import math
 from dataclasses import dataclass, field
+from importlib import import_module
 from typing import Any
 
 _RUN_IDS = itertools.count(1)
@@ -346,7 +347,16 @@ def _get_recovery(orch: Any) -> _RecoveryGraph | None:
     return capture if isinstance(capture, _RecoveryGraph) else None
 
 
-def _bind_recovery_domain(orch: Any, contexts: Any) -> None:
+def _bind_recovery_domain(orch: Any, contexts: Any, *, required_engine: str | None = None) -> None:
+    if required_engine is not None:
+        expected = getattr(import_module("simpler.task_interface").DomainRecoveryEngine, required_engine)
+        for rank in contexts.workers:
+            actual = contexts[rank].workspace_kind
+            if actual != expected.value:
+                raise ValueError(
+                    f"generated communication requires {required_engine}, rank {rank} domain uses {actual}; "
+                    "rebuild the runtime with the matching communication backend"
+                )
     capture = _get_recovery(orch)
     if capture is not None:
         capture.bind_domain(contexts)

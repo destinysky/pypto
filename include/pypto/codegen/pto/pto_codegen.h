@@ -548,11 +548,11 @@ class PTOCodegen : public CodegenBase {
   /**
    * @brief SSA name of the synthetic raw dispatch-args pointer parameter.
    *
-   * Functions containing ``pld.system.defer_wait`` receive one hidden
+   * Functions containing deferred waits or async GET receive one hidden
    * ``!pto.ptr<i64>`` parameter after dynamic dimensions and before other
    * runtime-owned parameters. The kernel wrapper forwards its ``args`` pointer
    * through this slot so deferred-completion lowering can reach the runtime's
-   * per-task AsyncCtx. Returns empty for functions without deferred waits.
+   * per-task AsyncCtx. Returns empty for functions without deferred completions.
    */
   [[nodiscard]] std::string GetDeferredCompletionRawArgsSSA() const {
     return fs_.deferred_completion_raw_args_ssa;
@@ -568,6 +568,10 @@ class PTOCodegen : public CodegenBase {
    * @return Stable adapter symbol name.
    */
   std::string RegisterDeferredCompletionAdapter();
+
+  /// Register the wrapper-owned URMA GET adapter and validate direct descriptor provenance.
+  std::string RegisterAsyncGetAdapter();
+  int64_t GetDirectTensorArgumentIndex(const ir::VarPtr& tensor) const;
 
   /**
    * @brief SSA name of the synthetic SPMD block_idx param.
@@ -1144,6 +1148,7 @@ class PTOCodegen : public CodegenBase {
 
   /// True when the module needs the wrapper-defined counter-completion adapter.
   bool needs_deferred_completion_adapter_ = false;
+  bool needs_async_get_adapter_ = false;
 
   const backend::Backend* backend_;  ///< Backend instance for querying op info
 

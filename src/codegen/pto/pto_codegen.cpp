@@ -598,7 +598,8 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
       if (!uses_sdma_workspace_ && ir::IsOp(op, "prefetch.make_context")) {
         uses_sdma_workspace_ = true;
       }
-      if (!uses_deferred_completion_ && ir::IsOp(op, "pld.system.defer_wait")) {
+      if (!uses_deferred_completion_ &&
+          (ir::IsOp(op, "pld.system.defer_wait") || ir::IsOp(op, "pld.tensor.get_async"))) {
         uses_deferred_completion_ = true;
       }
       if (!uses_spmd_block_ops_ &&
@@ -687,6 +688,7 @@ std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr,
   fs_.body_section.clear();
   gm_slot_buffer_offsets_.clear();
   needs_deferred_completion_adapter_ = false;
+  needs_async_get_adapter_ = false;
   PrepareGMSlotBufferLayout(program);
 
   const std::string target_arch = backend_->GetHandler()->GetPtoTargetArch();
@@ -708,6 +710,14 @@ std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr,
   }
 
   EmitDeferredCompletionAdapterDeclaration();
+  if (needs_async_get_adapter_) {
+    for (const auto& [gvar, func] : program->functions_) {
+      CHECK_SPAN(func->name_ != "pypto_urma_get_completion", func->span_)
+          << "Function name pypto_urma_get_completion is reserved for the URMA adapter";
+    }
+    stream_ << "  func.func private @pypto_urma_get_completion"
+               "(!pto.ptr<i64>, i32, i32, !pto.ptr<i64>, !pto.ptr<i64>, i32, i64, i64)\n";
+  }
 
   stream_ << "}\n";
   return stream_.str();
@@ -838,6 +848,23 @@ std::string PTOCodegen::EmitCommRemoteOffsetInline(const std::string& ctx_ssa, c
   const std::string delems = NewTemp();
   Emit(delems + " = arith.index_cast " + delems_i + " : i64 to index");
   return delems;
+}
+
+std::string PTOCodegen::RegisterAsyncGetAdapter() {
+  needs_async_get_adapter_ = true;
+  return "pypto_urma_get_completion";
+}
+
+int64_t PTOCodegen::GetDirectTensorArgumentIndex(const ir::VarPtr& tensor) const {
+  int64_t index = 0;
+  for (const auto& param : fs_.current_function->params_) {
+    if (!ir::AsTensorTypeLike(param->GetType())) continue;
+    if (param.get() == tensor.get()) return index;
+    ++index;
+  }
+  CHECK_SPAN(false, tensor->span_)
+      << "pld.tensor.get_async supports only direct window parameters, not tensor aliases";
+  return -1;
 }
 
 std::string PTOCodegen::RegisterDeferredCompletionAdapter() {

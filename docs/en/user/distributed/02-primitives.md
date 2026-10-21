@@ -50,6 +50,14 @@ even though they are as foundational as the substrate above.
 
 ## Notify & Wait: The Signal Handshake
 
+For local A5 URMA payloads, `pld.tensor.get_async(dst, peer=peer, src=src)`
+registers a GET in a dedicated top-level `pl.at(CORE_GROUP)` task. Both operands
+are registered contiguous full window parameters (static equal shapes, at most
+256 MiB). Its destination becomes ready at task completion, not at the next
+kernel statement. See [operator recovery](../execution/02-operator-recovery.md)
+for completion, backend selection and recovery constraints. Synchronous `get`
+and its staging implementation remain unchanged.
+
 The lowest-level synchronisation primitive. Each rank writes to a peer's
 signal cell, then blocks until its own cell has been written.
 

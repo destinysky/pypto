@@ -12,6 +12,7 @@
 #ifndef PYPTO_CODEGEN_DISTRIBUTED_DISTRIBUTED_CODEGEN_H_
 #define PYPTO_CODEGEN_DISTRIBUTED_DISTRIBUTED_CODEGEN_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <set>
@@ -202,6 +203,8 @@ class DistributedCodegen : public CodegenBase {
    *        Triggers UNREACHABLE if the call targets an invalid level/role.
    */
   bool TryEmitHierarchyCall(const ir::ExprPtr& expr);
+  // Return-position -> actual tensor argument, memoized once per callee.
+  const std::vector<size_t>& ReturnedTensorParameters(const ir::FunctionPtr& callee);
   void EmitDistIntrinsic(const ir::CallPtr& call);
   void EmitTreeReduce(const ir::CallPtr& call);
   void EmitTensorCreate(const ir::CallPtr& call);
@@ -314,6 +317,7 @@ class DistributedCodegen : public CodegenBase {
   // EmitCallToWorker when the callee has a TupleType return; consumed by
   // VisitStmt_(AssignStmt) when it encounters TupleGetItemExpr unpacking.
   std::map<std::pair<std::string, int>, std::string> tuple_element_tensors_;
+  std::unordered_map<std::string, std::vector<size_t>> returned_tensor_params_;
 
   // A distributed ``pl.submit`` returns the runtime TaskHandle as its final
   // tuple element. Keep it separate from tensor aliases so a later

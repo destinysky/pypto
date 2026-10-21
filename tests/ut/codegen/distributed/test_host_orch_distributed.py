@@ -232,7 +232,9 @@ def test_dist_tensor_formal_emits_continuous_tensor_make():
     assert "pld.system.get_comm_ctx" not in code, code
     # ``device=r`` → rank-pinned dispatch routes through ``_submit_chip`` (which
     # namespaces the per-rank DFX ``output_prefix``), passing the rank last.
-    assert re.search(r"_submit_chip\(orch, callables\[\"chip_orch\"\],.*config, \w+\)", code), code
+    assert re.search(
+        r"_submit_chip\(orch, callables\[\"chip_orch\"\],.*config, \w+, recovery_name=\"chip_orch\"\)", code
+    ), code
 
 
 def test_two_dist_tensor_formals_emit_two_explicit_ctx_scalars():
@@ -331,7 +333,9 @@ def test_const_device_kwarg_renders_literal_worker():
             return result
 
     code = _lower(Prog)
-    assert re.search(r"_submit_chip\(orch, callables\[\"chip_orch\"\],.*config, 0\)", code), code
+    assert re.search(
+        r"_submit_chip\(orch, callables\[\"chip_orch\"\],.*config, 0, recovery_name=\"chip_orch\"\)", code
+    ), code
     assert "__comm_d0[0].buffers" in code, code
     assert "__comm_d0[0].device_ctx" in code, code
 
@@ -457,7 +461,9 @@ def test_comm_less_dispatch_routes_through_submit_chip_unplaced():
     # The dispatch shape stays intact; the comm-less path routes through
     # ``_submit_chip(..., None)`` and emits no wrapper, no ctx-scalar /
     # Buffer.tensor / handle subscript, and no ``worker=`` kwarg.
-    assert re.search(r"_submit_chip\(orch, callables\[\"chip_orch\"\],.*config, None\)", code), code
+    assert re.search(
+        r"_submit_chip\(orch, callables\[\"chip_orch\"\],.*config, None, recovery_name=\"chip_orch\"\)", code
+    ), code
     assert "worker=" not in code, code
     assert ".buffers[" not in code, code
     assert "__comm_d0[" not in code, code
@@ -697,7 +703,7 @@ def test_host_submit_deps_lower_to_l3_add_dep_wait():
 
     assert "_ta_0_handle = _submit_chip(" in generated, generated
     assert "producer_task = _ta_0_handle" in generated, generated
-    assert "_ta_1.add_dep_wait(producer_task)" in generated, generated
+    assert "_add_dispatch_dependency(orch, _ta_1, producer_task)" in generated, generated
     assert "_ta_1_handle = _submit_chip(" in generated, generated
     assert "_consumer_task = _ta_1_handle" in generated, generated
     assert "_last_task" not in generated, generated
@@ -731,6 +737,33 @@ def test_dist_tensor_result_never_aliases_through_tensors_dict():
     assert "_submit_chip(" in generated, generated
     assert 'tensors["_result"]' not in generated, generated
     compile(generated, "<host_orch>", "exec")
+
+
+def test_return_aliases_follow_return_positions_not_mutable_parameter_order():
+    """An unreturned mutable window must not displace reordered tensor results."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            window: pl.InOut[pld.DistributedTensor[[SIZE], pl.FP32]],
+            left: pl.Out[pl.Tensor[[SIZE], pl.FP32]],
+            right: pl.Out[pl.Tensor[[SIZE], pl.FP32]],
+        ) -> tuple[pl.Tensor[[SIZE], pl.FP32], pl.Tensor[[SIZE], pl.FP32]]:
+            return right, left
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self, left: pl.Tensor[[SIZE], pl.FP32], right: pl.Tensor[[SIZE], pl.FP32]):
+            window_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            window = pld.window(window_buf, [SIZE], dtype=pl.FP32)
+            first, second = self.chip_orch(window, left, right, device=0)
+            return 0
+
+    generated = _lower(Prog)
+    assert 'tensors["first"] = tensors["right"]' in generated, generated
+    assert 'tensors["second"] = tensors["left"]' in generated, generated
+    assert 'tensors["window"]' not in generated, generated
 
 
 def test_host_submit_requires_explicit_output_arguments():

@@ -2,13 +2,18 @@
 # Licensed under CANN Open Software License Agreement Version 2.0.
 """Rank publication and concrete alias checks for compiler-derived contracts."""
 
+import json
+import runpy
 import sys
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 import torch
-from pypto.runtime.operator_recovery import OperatorRecoveryConfig, _RecoveryGraph
+from pypto import ir
+from pypto.pypto_core import passes
+from pypto.runtime.operator_recovery import OperatorRecoveryConfig, _bind_recovery_domain, _RecoveryGraph
 
 
 class Args:
@@ -109,6 +114,75 @@ def test_manual_safety_override_is_removed():
             OperatorRecoveryConfig(**options)
 
 
+@pytest.mark.parametrize("with_binding", [False, True])
+def test_generated_urma_domain_requirement_checks_every_rank_without_recovery(with_binding):
+    """Use real domain/native binding types, including when recovery is disabled."""
+    api = pytest.importorskip("simpler.task_interface")
+
+    contexts = {}
+    for rank in range(2):
+        context = api.ChipDomainContext(
+            name="urma",
+            domain_rank=rank,
+            domain_size=2,
+            device_ctx=100 + rank,
+            local_window_base=1000 + rank * 1000,
+            actual_window_size=64,
+            buffers={},
+            recovery_binding=api.RecoveryDomainBinding() if with_binding else None,
+        )
+        context.workspace_kind = api.DomainRecoveryEngine.URMA.value
+        contexts[rank] = context
+    domain = api.CommDomainHandle(
+        name="urma",
+        workers=(0, 1),
+        contexts=contexts,
+        allocation_id=0,
+        _release_fn=lambda _: None,
+    )
+    _bind_recovery_domain(SimpleNamespace(), domain, required_engine="URMA")
+    contexts[1].workspace_kind = api.DomainRecoveryEngine.SDMA.value
+    with pytest.raises(ValueError, match="requires URMA, rank 1"):
+        _bind_recovery_domain(SimpleNamespace(), domain, required_engine="URMA")
+    contexts[1].workspace_kind = api.DomainRecoveryEngine.NONE.value
+    with pytest.raises(ValueError, match="requires URMA, rank 1"):
+        _bind_recovery_domain(SimpleNamespace(), domain, required_engine="URMA")
+    _bind_recovery_domain(SimpleNamespace(), domain)
+
+
+def test_urma_program_codegen_keeps_replay_proof_and_actual_get(tmp_path, monkeypatch):
+    """Run the full compiler pipeline for the same JIT program exercised on A5."""
+    source = Path(__file__).resolve().parents[2] / "st/distributed/test_l3_operator_recovery.py"
+    definitions = runpy.run_path(str(source))
+    definitions["instrument_wrappers"](monkeypatch, backend="urma")
+    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+        compiled = ir.compile(
+            definitions["urma_program"].specialize(),
+            platform="a5",
+            skip_ptoas=True,
+            output_dir=str(tmp_path / "program"),
+            distributed_config=ir.DistributedConfig(device_ids=[0, 1]),
+        )
+    meta = json.loads((compiled.output_dir / "distributed_meta.json").read_text())
+    assert meta["recovery_effects"]["urma_exchange"]["safe"], meta["recovery_effects"]
+    code = (compiled.output_dir / "orchestration/host_orch.py").read_text()
+    assert 'required_engine="URMA"' in code
+    mlir = "\n".join(path.read_text() for path in compiled.output_dir.rglob("*.pto"))
+    assert "func.call @pypto_urma_get_completion" in mlir
+    assert "pto.comm.tget(" not in mlir
+    orchestration = (
+        compiled.output_dir / "next_levels/urma_exchange/orchestration/urma_exchange.cpp"
+    ).read_text()
+    # The notification injection and payload share a single-producer URMA queue.
+    # A TaskId dependency must gate payload admission on full notification completion.
+    assert "TaskOutputTensors urma_protocol_ready = rt_submit_aiv_task(1, params_t1);" in orchestration
+    assert "const TaskId urma_protocol_deps[] = {urma_protocol_ready.task_id()};" in orchestration
+    assert "params_t2.set_dependencies(urma_protocol_deps, 1);" in orchestration
+    assert orchestration.index("params_t2.set_dependencies(") < orchestration.index("rt_submit_aiv_task(2,")
+    print("[PYPTO_RECOVERY_TEST] URMA_PROTOCOL_ORDER_PASS", flush=True)
+    print("[PYPTO_RECOVERY_TEST] URMA_GENERATED_GRAPH_PASS", flush=True)
+
+
 @pytest.mark.parametrize("misuse", ["different-callable", "wrong-rank", "forward-dependency"])
 def test_group_validation_precedes_publication(graph, misuse):
     capture, contexts = graph
@@ -203,7 +277,8 @@ def test_explicit_dependency_survives_without_a_memory_hazard(graph):
     assert all(args.dependencies == [first] for args in consumers)
 
 
-def test_generated_program_native_argument_contract(tmp_path):
+@pytest.mark.parametrize("transport", ["sdma", "urma"])
+def test_generated_program_native_argument_contract(tmp_path, transport):
     """The real generated host graph reaches native mailboxes before graph closure."""
     api = pytest.importorskip("simpler.task_interface")
     import ctypes  # noqa: PLC0415
@@ -229,7 +304,9 @@ def test_generated_program_native_argument_contract(tmp_path):
     definitions = runpy.run_path(str(source))
     with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
         compiled = ir.compile(
-            definitions["build_program"](),
+            definitions["urma_program"].specialize()
+            if transport == "urma"
+            else definitions["build_program"](),
             platform="a5",
             skip_ptoas=True,
             output_dir=str(tmp_path / "program"),
@@ -287,7 +364,7 @@ def test_generated_program_native_argument_contract(tmp_path):
 
         @contextmanager
         def allocate_domain(self, **kwargs):
-            contexts = []
+            contexts = {}
             for rank in range(2):
                 binding = api.RecoveryDomainBinding()
                 binding.allocation_id, binding.generation = 0, 1
@@ -304,16 +381,29 @@ def test_generated_program_native_argument_contract(tmp_path):
                         owner_worker_id=rank,
                     )
                     offset += slot.nbytes
-                contexts.append(
-                    SimpleNamespace(
-                        domain_rank=rank,
-                        domain_size=2,
-                        recovery_binding=binding,
-                        device_ctx=binding.device_ctx,
-                        buffers=buffers,
-                    )
+                contexts[rank] = api.ChipDomainContext(
+                    name=kwargs["name"],
+                    domain_rank=rank,
+                    domain_size=2,
+                    recovery_binding=binding,
+                    device_ctx=binding.device_ctx,
+                    local_window_base=binding.local_window_base,
+                    actual_window_size=binding.window_size,
+                    workspace_kind=(
+                        api.DomainRecoveryEngine.URMA
+                        if transport == "urma"
+                        else api.DomainRecoveryEngine.SDMA
+                    ).value,
+                    buffers=buffers,
                 )
-            yield contexts
+            with api.CommDomainHandle(
+                name=kwargs["name"],
+                workers=tuple(kwargs["workers"]),
+                contexts=contexts,
+                allocation_id=0,
+                _release_fn=lambda _: None,
+            ) as domain:
+                yield domain
 
         def submit_next_level_group(self, callable_id, args_list, cfg, *, workers):
             captured.append((callable_id, args_list))
@@ -333,7 +423,10 @@ def test_generated_program_native_argument_contract(tmp_path):
     callback = _make_dispatch_orchestration(
         entry,
         tensors,
-        {"warmup": 1, "exchange": 2, "finish": 3},
+        {
+            ("urma_" if transport == "urma" else "") + name: index
+            for index, name in enumerate(("warmup", "exchange", "finish"), 1)
+        },
         {},
         api.CallConfig(),
         2,
@@ -361,7 +454,7 @@ def test_generated_program_native_argument_contract(tmp_path):
                             assert args.scalar(argument.index) == binding.domain.device_ctx
                         else:
                             assert argument.index < args.tensor_count()
-        print("[PYPTO_RECOVERY_TEST] INCREMENTAL_NATIVE_GRAPH_PASS", flush=True)
+        print(f"[PYPTO_RECOVERY_TEST] INCREMENTAL_NATIVE_GRAPH_PASS backend={transport}", flush=True)
     finally:
         native_orch._close_run_submission(run)
         try:
