@@ -355,14 +355,24 @@ def _run_directory(compiled: Any) -> Path:
     return runtime_output_directory(compiled)
 
 
-def _collect_program_swimlane(compiled: Any) -> None:
+def _collect_program_swimlane(compiled: Any, *, recovery_callables: dict[str, Any] | None = None) -> None:
+    # Recovery adds physical attempts, so a capture ordinal cannot identify its
+    # program. Resolve the child's existing digest only during DFX postprocessing.
+    options: dict[str, Any] = {}
+    if recovery_callables is not None:
+        programs: dict[str, str | None] = {}
+        for name, handle in recovery_callables.items():
+            digest = handle.digest.hex()
+            programs[digest] = name if digest not in programs or programs[digest] == name else None
+        options["recovery_programs"] = programs
     if vars(compiled).get("_artifact_runtime") is None:
-        _collect_l3_swimlane(compiled.output_dir, compiled.platform)
+        _collect_l3_swimlane(compiled.output_dir, compiled.platform, **options)
     else:
         _collect_l3_swimlane(
             vars(compiled)["_artifact_runtime"].directory,
             compiled.platform,
             run_directory=_run_directory(compiled),
+            **options,
         )
 
 
@@ -1291,7 +1301,13 @@ def _write_dispatch_name_map(
     return name_map_path
 
 
-def _collect_l3_swimlane(output_dir: Path, platform: str, *, run_directory: Path | None = None) -> None:
+def _collect_l3_swimlane(
+    output_dir: Path,
+    platform: str,
+    *,
+    run_directory: Path | None = None,
+    recovery_programs: dict[str, str | None] | None = None,
+) -> None:
     """Convert each dispatch's swimlane records into a ``merged_swimlane_*.json``.
 
     The runtime writes ``rank{r}/d{k}/deps.json`` in the graph pass and
@@ -1378,14 +1394,21 @@ def _collect_l3_swimlane(output_dir: Path, platform: str, *, run_directory: Path
                 for stale in disp_dir.glob("name_map*.json"):
                     stale.unlink(missing_ok=True)
                 deps_json, graph_dir = _resolve_capture_graph(rank_dir, disp_dir, pairs)
-                program = _read_dispatch_program(disp_dir)
-                if program is None and graph_dir is not None:
-                    program = _read_dispatch_program(graph_dir)
-                if program is None and len(chip_dirs) == 1:
-                    # One L2 program in the build: no ambiguity to resolve, so an
-                    # unmarked dispatch (e.g. artifacts from an older run) can
-                    # still be named correctly.
-                    program = next(iter(chip_dirs))
+                if recovery_programs is not None:
+                    # Each retry has its own capture. Never use submission-order
+                    # markers here: retries shift every following capture index.
+                    identity = _read_dispatch_identity(disp_dir) or {}
+                    digest = identity.get("callable_digest")
+                    program = recovery_programs.get(digest) if isinstance(digest, str) else None
+                else:
+                    program = _read_dispatch_program(disp_dir)
+                    if program is None and graph_dir is not None:
+                        program = _read_dispatch_program(graph_dir)
+                    if program is None and len(chip_dirs) == 1:
+                        # One L2 program in the build: no ambiguity to resolve, so an
+                        # unmarked dispatch (e.g. artifacts from an older run) can
+                        # still be named correctly.
+                        program = next(iter(chip_dirs))
                 if program is None or program not in chip_dirs:
                     print(
                         f"No L2 program recorded for {rank_dir.name}/{disp_dir.name}; converting with "
@@ -3200,7 +3223,14 @@ class DistributedWorker(Worker):
                         frame.keepalive,
                     ),
                 )
-                _collect_program_swimlane(compiled)
+                _collect_program_swimlane(
+                    compiled,
+                    **(
+                        {"recovery_callables": state["chip_cids"]}
+                        if self._operator_recovery is not None
+                        else {}
+                    ),
+                )
                 self._release_unpublished_dispatch_frame(frame)
                 return DistributedRunHandle._completed(self)
 
@@ -3208,7 +3238,14 @@ class DistributedWorker(Worker):
             if config is not None and config.enable_chip_swimlane > 0:
 
                 def collect_swimlane() -> None:
-                    _collect_program_swimlane(compiled)
+                    _collect_program_swimlane(
+                        compiled,
+                        **(
+                            {"recovery_callables": state["chip_cids"]}
+                            if self._operator_recovery is not None
+                            else {}
+                        ),
+                    )
 
                 postprocess = collect_swimlane
             handle = DistributedRunHandle(self, None, frame, dispatch_id, postprocess)

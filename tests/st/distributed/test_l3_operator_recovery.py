@@ -497,5 +497,71 @@ def test_urma_program_continues(test_config, device_ids, mode, capfd, caplog, mo
         )
 
 
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("mode", ["healthy", "transient"])
+def test_recovery_dfx_labels(test_config, device_ids, mode, capfd, monkeypatch, tmp_path):
+    """Check real SDMA capture labels, including replay."""
+    if _urma_enabled():
+        pytest.skip("SDMA-only DFX test: URMA two-pass domain registration is not yet fixed")
+
+    from pypto.runtime.distributed_runner import _run_directory  # noqa: PLC0415
+    from simpler_setup.tools.swimlane_converter import load_kernel_config  # noqa: PLC0415
+
+    if test_config.platform != "a5" or len(device_ids) != 2:
+        pytest.skip("recovery DFX requires exactly two local A5 devices")
+    backend = "sdma"
+    instrument_wrappers(monkeypatch, backend=backend)
+    x = torch.arange(2 * N, dtype=torch.float32).reshape(2, 1, N).share_memory_()
+    y = torch.zeros_like(x).share_memory_()
+    stats = torch.zeros((2, 1, 8), dtype=torch.int32).share_memory_()
+    fault = int(mode == "transient")
+    dc = DistributedConfig(device_ids=device_ids, num_sub_workers=0, aicpu_thread_num=2)
+    compiled = ir.compile(
+        build_program(), platform="a5", output_dir=str(tmp_path / "program"), distributed_config=dc
+    )
+    with compiled.prepare(operator_recovery=OperatorRecoveryConfig()) as runtime:
+        callables = runtime._states[compiled]["chip_cids"]
+        programs = {handle.digest.hex(): name for name, handle in callables.items()}
+        runtime(x, y, stats, fault, config=RunConfig(platform="a5", enable_chip_swimlane=1))
+    torch.testing.assert_close(y, x.flip(0) + 4, rtol=0, atol=0)
+    captured = capfd.readouterr()
+    logs = captured.out + captured.err
+    with capfd.disabled():
+        print(logs, end="", flush=True)
+    dispatches = len(re.findall(r"\[PTO_RECOVERY\] REPLAY_DISPATCH ", logs))
+    commits = len(re.findall(r"\[PTO_RECOVERY\] REPLAY_COMMIT ", logs))
+    # Swimlane executes graph and timing passes. Their mutable state is not
+    # restored by the existing DFX protocol, so injection may fire in either/both.
+    assert dispatches == commits
+    assert dispatches > 0 if fault else dispatches == 0
+    assert "507014" not in logs and "AUTO_RECOVERY_FAILED" not in logs
+    assert "No L2 program recorded" not in logs
+    assert "Skipping L3 swimlane name_map" not in logs
+    assert "Skipping L3 swimlane conversion" not in logs
+    dfx = _run_directory(compiled) / "dfx_outputs"
+    captures = []
+    for rank in range(2):
+        rank_programs = set()
+        for records in sorted((dfx / f"rank{rank}").glob("d[0-9]*/chip_swimlane_records.json")):
+            capture = records.parent
+            identity = json.loads((capture / "dispatch_identity.json").read_text())
+            name = programs[identity["callable_digest"]]
+            name_map = json.loads((capture / "name_map.json").read_text())
+            expected = load_kernel_config(
+                str(compiled.output_dir / "next_levels" / name / "kernel_config.py")
+            )
+            assert expected and name_map["callable_id_to_name"] == expected
+            assert list(capture.glob("merged_swimlane_*.json")), capture
+            rank_programs.add(name)
+            captures.append((rank, capture.name, name))
+        assert rank_programs == set(programs.values()), rank_programs
+    with capfd.disabled():
+        print(
+            f"[PYPTO_RECOVERY_TEST] RECOVERY_DFX_HARDWARE_PASS backend={backend} mode={mode} "
+            f"replays={dispatches} captures={captures}",
+            flush=True,
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

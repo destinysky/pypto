@@ -5,6 +5,7 @@
 import json
 import runpy
 import sys
+from importlib import import_module
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock
@@ -12,6 +13,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from pypto import ir
+from pypto.ir.distributed_compiled_program import DistributedCompiledProgram
 from pypto.pypto_core import passes
 from pypto.runtime.operator_recovery import OperatorRecoveryConfig, _bind_recovery_domain, _RecoveryGraph
 
@@ -467,6 +469,65 @@ def test_generated_program_native_argument_contract(tmp_path, transport):
                 thread.join(3)
                 assert not thread.is_alive()
             host._worker.close()
+
+
+@pytest.mark.parametrize("backend", ["sdma", "urma"])
+def test_dfx_hardware_setup_compiles_before_device_prepare(tmp_path, monkeypatch, backend):
+    """Compile the SDMA ST on CPU; reject URMA before compilation or device setup."""
+    source = Path(__file__).resolve().parents[2] / "st/distributed/test_l3_operator_recovery.py"
+    definitions = runpy.run_path(str(source))
+    run_test = definitions["test_recovery_dfx_labels"]
+    monkeypatch.setitem(run_test.__globals__, "_urma_enabled", lambda: backend == "urma")
+    if backend == "urma":
+        compile_guard = MagicMock(side_effect=AssertionError("URMA DFX must skip before compilation"))
+        prepare_guard = MagicMock(side_effect=AssertionError("URMA DFX must skip before device setup"))
+        monkeypatch.setattr(ir, "compile", compile_guard)
+        monkeypatch.setattr(DistributedCompiledProgram, "prepare", prepare_guard)
+        for mode in ("healthy", "transient"):
+            with pytest.raises(pytest.skip.Exception, match="SDMA-only DFX test"):
+                run_test(SimpleNamespace(platform="a5"), [0, 1], mode, None, monkeypatch, tmp_path)
+        compile_guard.assert_not_called()
+        prepare_guard.assert_not_called()
+        return
+    # Conversion is beyond the device boundary; keep this CPU test runtime-optional.
+    setup = ModuleType("simpler_setup")
+    tools = ModuleType("simpler_setup.tools")
+    converter = ModuleType("simpler_setup.tools.swimlane_converter")
+    converter.load_kernel_config = MagicMock(side_effect=AssertionError("device boundary crossed"))
+    setup.tools, tools.swimlane_converter = tools, converter
+    for module in (setup, tools, converter):
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+    compile_module = import_module("pypto.ir.compile")
+    original_compile = compile_module.compile
+
+    def compile_on_cpu(*args, **kwargs):
+        kwargs["skip_ptoas"] = True
+        # Match the existing distributed codegen tests: verify every pass;
+        # printer roundtripping of window names is a separate compiler check.
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            return original_compile(*args, **kwargs)
+
+    monkeypatch.setattr(compile_module, "compile", compile_on_cpu)
+    monkeypatch.setattr(ir, "compile", compile_on_cpu)
+    prepared = []
+
+    class ReachedDevicePrepare(Exception):
+        pass
+
+    def stop_before_device(compiled, **options):
+        assert options["operator_recovery"] == OperatorRecoveryConfig()
+        assert compiled.output_dir == tmp_path / "program"
+        metadata = json.loads((compiled.output_dir / "distributed_meta.json").read_text())
+        assert metadata["recovery_effects"]["exchange"]["safe"]
+        assert (compiled.output_dir / "orchestration/host_orch.py").is_file()
+        prepared.append(compiled)
+        raise ReachedDevicePrepare
+
+    monkeypatch.setattr(DistributedCompiledProgram, "prepare", stop_before_device)
+    with pytest.raises(ReachedDevicePrepare):
+        run_test(SimpleNamespace(platform="a5"), [0, 1], "healthy", None, monkeypatch, tmp_path)
+    assert len(prepared) == 1
+    converter.load_kernel_config.assert_not_called()
 
 
 if __name__ == "__main__":

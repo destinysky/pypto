@@ -4299,5 +4299,133 @@ class TestDeviceMemoryInfo:
         rt.close()
 
 
+class TestRecoverySwimlane:
+    """Resolve actual captures, including retries, without changing dispatch."""
+
+    @pytest.mark.parametrize("two_pass", [False, True])
+    def test_prepared_recovery_forwards_registered_callables(self, patched_setup, tmp_path, two_pass):
+        from pypto.runtime import OperatorRecoveryConfig  # noqa: PLC0415
+
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+        compiled.platform = "a5" if two_pass else "a5sim"
+        compiled.output_dir = tmp_path
+        rt = DistributedWorker(compiled)
+        # Construction is stubbed; exercise both existing DFX completion paths.
+        rt._operator_recovery = OperatorRecoveryConfig()
+        callables = {"chip_orch": SimpleNamespace(digest=b"\x01" * 32)}
+        rt._states[compiled]["chip_cids"] = callables
+        config = RunConfig(platform=compiled.platform, enable_chip_swimlane=1)
+        with patch("pypto.runtime.distributed_runner._collect_program_swimlane") as collect:
+            rt(_resident(rt, (16, 16)), config=config)
+        collect.assert_called_once_with(compiled, recovery_callables=callables)
+        assert patched_setup["submit_dispatch"].call_count == (2 if two_pass else 1)
+        rt.close()
+
+    @pytest.mark.parametrize("sequence", [("first", "last"), ("first", "first", "last")])
+    def test_recovery_programs_follow_physical_attempts(
+        self, tmp_path, monkeypatch, fake_swimlane_converter, sequence
+    ):
+        from pypto.runtime.distributed_runner import _collect_program_swimlane  # noqa: PLC0415
+
+        seen = TestCollectL3Swimlane._spy_generate_swimlane(monkeypatch)
+        handles = {name: SimpleNamespace(digest=bytes([i]) * 32) for i, name in enumerate(("first", "last"))}
+        for name in handles:
+            _write_chip_program(tmp_path, name, name + "_kernel")
+        for rank in range(2):
+            for index, name in enumerate(sequence):
+                capture = _write_capture(
+                    tmp_path / "dfx_outputs" / f"rank{rank}",
+                    f"d{index + 7}",
+                    records=True,
+                    deps=True,
+                    run_id=3,
+                    capture_index=index + 7,
+                    digest=handles[name].digest.hex(),
+                )
+                # An ordinal marker from a logical submission would mislabel a
+                # replay and/or its successor. Physical identity must win.
+                _mark_dispatch_program(capture, "last" if name == "first" else "first")
+        compiled = SimpleNamespace(output_dir=tmp_path, platform="a5")
+        _collect_program_swimlane(compiled, recovery_callables=handles)
+        assert len(seen) == 2 * len(sequence)
+        for call, name in zip(seen, sequence * 2, strict=True):
+            assert call.work_dir.name == name
+            assert json.loads(call.func_names.read_text()) == {
+                "level": 2,
+                "orchestrator_name": None,
+                "callable_id_to_name": {"0": name + "_kernel"},
+            }
+        print("[PYPTO_RECOVERY_TEST] RECOVERY_DFX_LABELS_PASS")
+
+    def test_two_pass_replay_captures_keep_their_programs(
+        self, tmp_path, monkeypatch, fake_swimlane_converter
+    ):
+        seen = TestCollectL3Swimlane._spy_generate_swimlane(monkeypatch)
+        for name in ("first", "last"):
+            _write_chip_program(tmp_path, name, name + "_kernel")
+        rank = tmp_path / "dfx_outputs" / "rank0"
+        sequence = ("first", "first", "last")
+        for run, offset in ((4, 10), (5, 13)):
+            for i, name in enumerate(sequence):
+                _write_capture(
+                    rank,
+                    f"d{offset + i}",
+                    deps=run == 4,
+                    records=run == 5,
+                    run_id=run,
+                    capture_index=offset + i,
+                    digest=name,
+                )
+        _collect_l3_swimlane(tmp_path, "a5", recovery_programs={name: name for name in sequence})
+        assert len(seen) == 3
+        for call, name in zip(seen, sequence, strict=True):
+            assert call.work_dir.name == name
+            assert (call.out_dir / "deps.json").is_file()
+            assert (call.out_dir / "dispatch_identity.timing.json").is_file()
+            assert json.loads(call.func_names.read_text()) == {
+                "level": 2,
+                "orchestrator_name": None,
+                "callable_id_to_name": {"0": name + "_kernel"},
+            }
+
+    @pytest.mark.parametrize("identity", [None, {"callable_digest": "unknown"}, {"callable_digest": []}])
+    def test_recovery_never_guesses_from_an_ordinal_or_sole_program(
+        self, tmp_path, monkeypatch, fake_swimlane_converter, identity
+    ):
+        seen = TestCollectL3Swimlane._spy_generate_swimlane(monkeypatch)
+        _write_chip_program(tmp_path, "only", "only_kernel")
+        capture = _write_capture(tmp_path / "dfx_outputs" / "rank0", "d0", records=True, deps=True)
+        _mark_dispatch_program(capture, "only")
+        if identity is not None:
+            (capture / "dispatch_identity.json").write_text(json.dumps(identity))
+        _collect_l3_swimlane(tmp_path, "a5", recovery_programs={"known": "only"})
+        assert len(seen) == 1
+        assert seen[0].func_names is None
+        assert seen[0].work_dir == tmp_path
+
+    def test_alias_programs_with_the_same_digest_stay_anonymous(
+        self, tmp_path, monkeypatch, fake_swimlane_converter
+    ):
+        from pypto.runtime.distributed_runner import _collect_program_swimlane  # noqa: PLC0415
+
+        seen = TestCollectL3Swimlane._spy_generate_swimlane(monkeypatch)
+        for name in ("first", "last"):
+            _write_chip_program(tmp_path, name, name + "_kernel")
+        _write_capture(
+            tmp_path / "dfx_outputs" / "rank0",
+            "d0",
+            records=True,
+            deps=True,
+            run_id=1,
+            capture_index=0,
+            digest="00",
+        )
+        compiled = SimpleNamespace(output_dir=tmp_path, platform="a5")
+        handles = {name: SimpleNamespace(digest=b"\x00") for name in ("first", "last")}
+        _collect_program_swimlane(compiled, recovery_callables=handles)
+        assert len(seen) == 1
+        assert seen[0].func_names is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
