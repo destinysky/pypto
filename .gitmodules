@@ -7,3 +7,4 @@
 [submodule "simpler"]
 	path = runtime
 	url = https://github.com/destinysky/simpler
+	branch = opretry-fix-urma-dfx

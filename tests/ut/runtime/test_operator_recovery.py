@@ -3,6 +3,7 @@
 """Rank publication and concrete alias checks for compiler-derived contracts."""
 
 import json
+import logging
 import runpy
 import sys
 from importlib import import_module
@@ -472,23 +473,12 @@ def test_generated_program_native_argument_contract(tmp_path, transport):
 
 
 @pytest.mark.parametrize("backend", ["sdma", "urma"])
-def test_dfx_hardware_setup_compiles_before_device_prepare(tmp_path, monkeypatch, backend):
-    """Compile the SDMA ST on CPU; reject URMA before compilation or device setup."""
+def test_dfx_hardware_setup_compiles_before_device_prepare(tmp_path, monkeypatch, caplog, backend):
+    """Compile both DFX backends through their actual setup before device preparation."""
     source = Path(__file__).resolve().parents[2] / "st/distributed/test_l3_operator_recovery.py"
     definitions = runpy.run_path(str(source))
     run_test = definitions["test_recovery_dfx_labels"]
     monkeypatch.setitem(run_test.__globals__, "_urma_enabled", lambda: backend == "urma")
-    if backend == "urma":
-        compile_guard = MagicMock(side_effect=AssertionError("URMA DFX must skip before compilation"))
-        prepare_guard = MagicMock(side_effect=AssertionError("URMA DFX must skip before device setup"))
-        monkeypatch.setattr(ir, "compile", compile_guard)
-        monkeypatch.setattr(DistributedCompiledProgram, "prepare", prepare_guard)
-        for mode in ("healthy", "transient"):
-            with pytest.raises(pytest.skip.Exception, match="SDMA-only DFX test"):
-                run_test(SimpleNamespace(platform="a5"), [0, 1], mode, None, monkeypatch, tmp_path)
-        compile_guard.assert_not_called()
-        prepare_guard.assert_not_called()
-        return
     # Conversion is beyond the device boundary; keep this CPU test runtime-optional.
     setup = ModuleType("simpler_setup")
     tools = ModuleType("simpler_setup.tools")
@@ -515,19 +505,86 @@ def test_dfx_hardware_setup_compiles_before_device_prepare(tmp_path, monkeypatch
         pass
 
     def stop_before_device(compiled, **options):
+        if backend == "urma":
+            assert logging.getLogger("simpler").getEffectiveLevel() == logging.INFO
         assert options["operator_recovery"] == OperatorRecoveryConfig()
         assert compiled.output_dir == tmp_path / "program"
         metadata = json.loads((compiled.output_dir / "distributed_meta.json").read_text())
-        assert metadata["recovery_effects"]["exchange"]["safe"]
+        name = "urma_exchange" if backend == "urma" else "exchange"
+        assert metadata["recovery_effects"][name]["safe"]
         assert (compiled.output_dir / "orchestration/host_orch.py").is_file()
         prepared.append(compiled)
         raise ReachedDevicePrepare
 
     monkeypatch.setattr(DistributedCompiledProgram, "prepare", stop_before_device)
     with pytest.raises(ReachedDevicePrepare):
-        run_test(SimpleNamespace(platform="a5"), [0, 1], "healthy", None, monkeypatch, tmp_path)
+        run_test(SimpleNamespace(platform="a5"), [0, 1], "healthy", None, caplog, monkeypatch, tmp_path)
     assert len(prepared) == 1
     converter.load_kernel_config.assert_not_called()
+
+
+def test_dfx_hardware_validation_reads_child_log_files(tmp_path, monkeypatch, capfd, caplog):
+    """Exercise the hardware validator across its console-to-file log transition."""
+    source = Path(__file__).resolve().parents[2] / "st/distributed/test_l3_operator_recovery.py"
+    run_test = runpy.run_path(str(source))["test_recovery_dfx_labels"]
+    monkeypatch.setitem(run_test.__globals__, "_urma_enabled", lambda: True)
+    monkeypatch.setitem(run_test.__globals__, "instrument_wrappers", lambda *args, **kwargs: None)
+    compiled = MagicMock(output_dir=tmp_path / "program")
+    monkeypatch.setitem(
+        run_test.__globals__, "urma_program", SimpleNamespace(compile=lambda *args, **kwargs: compiled)
+    )
+    runtime = compiled.prepare.return_value.__enter__.return_value
+    runtime._states = {compiled: {"chip_cids": {"task": SimpleNamespace(digest=b"task")}}}
+    dfx = compiled.output_dir / "dfx_outputs"
+    capture = dfx / "rank0/d0"
+    capture.mkdir(parents=True)
+    (capture / "chip_swimlane_records.json").write_text("{}")
+    (capture / "dispatch_identity.json").write_text(json.dumps({"callable_digest": b"task".hex()}))
+    (capture / "name_map.json").write_text("{}")
+    missing_destroy = False
+
+    def execute(x, y, stats, fault, *, config):
+        y.copy_(x.flip(0) + 4)
+        # Initial creation precedes the first dispatch; subsequent native records
+        # have exactly one file destination, rather than also reaching stderr.
+        for rank in range(2):
+            records = []
+            for allocation in range(2):
+                domain = f"0x{16 + 2 * rank + allocation:x}"
+                created = (
+                    f"URMA_DOMAIN_OWNER_CREATE_RESULT rank={rank} allocation_id={allocation} "
+                    f"base_hccl=0x1 domain_hccl={domain} rc=0\n"
+                )
+                if allocation == 0:
+                    print(created, end="", file=sys.stderr)
+                else:
+                    records.append(created)
+                if not (missing_destroy and rank == 1 and allocation == 1):
+                    records.append(
+                        f"URMA_DOMAIN_OWNER_DESTROY_RESULT rank={rank} allocation_id={allocation} "
+                        f"domain_hccl={domain} rc=0\n"
+                    )
+            (dfx / f"host.{rank}.log").write_text("".join(records))
+        (dfx / "host.2.log").write_text("[PTO_RECOVERY] REPLAY_DISPATCH \n[PTO_RECOVERY] REPLAY_COMMIT \n")
+
+    runtime.side_effect = execute
+    setup, tools = ModuleType("simpler_setup"), ModuleType("simpler_setup.tools")
+    converter = ModuleType("simpler_setup.tools.swimlane_converter")
+
+    class ReachedCaptureValidation(Exception):
+        pass
+
+    converter.load_kernel_config = MagicMock(side_effect=ReachedCaptureValidation)
+    setup.tools, tools.swimlane_converter = tools, converter
+    for module in (setup, tools, converter):
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+    with pytest.raises(ReachedCaptureValidation):
+        run_test(SimpleNamespace(platform="a5"), [0, 1], "transient", capfd, caplog, monkeypatch, tmp_path)
+    missing_destroy = True
+    with pytest.raises(AssertionError) as failure:
+        run_test(SimpleNamespace(platform="a5"), [0, 1], "transient", capfd, caplog, monkeypatch, tmp_path)
+    created, destroyed = failure.value.args[0]
+    assert len(created) == 4 and len(destroyed) == 3
 
 
 if __name__ == "__main__":

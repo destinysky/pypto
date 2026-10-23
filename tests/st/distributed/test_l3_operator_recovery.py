@@ -499,33 +499,49 @@ def test_urma_program_continues(test_config, device_ids, mode, capfd, caplog, mo
 
 @pytest.mark.timeout(300)
 @pytest.mark.parametrize("mode", ["healthy", "transient"])
-def test_recovery_dfx_labels(test_config, device_ids, mode, capfd, monkeypatch, tmp_path):
-    """Check real SDMA capture labels, including replay."""
-    if _urma_enabled():
-        pytest.skip("SDMA-only DFX test: URMA two-pass domain registration is not yet fixed")
-
+def test_recovery_dfx_labels(test_config, device_ids, mode, capfd, caplog, monkeypatch, tmp_path):
+    """Check capture labels and registration ownership across both profiling passes."""
     from pypto.runtime.distributed_runner import _run_directory  # noqa: PLC0415
     from simpler_setup.tools.swimlane_converter import load_kernel_config  # noqa: PLC0415
 
     if test_config.platform != "a5" or len(device_ids) != 2:
         pytest.skip("recovery DFX requires exactly two local A5 devices")
-    backend = "sdma"
+    backend = "urma" if _urma_enabled() else "sdma"
+    if backend == "urma":
+        # Worker.init snapshots this threshold before forking the chip processes.
+        caplog.set_level(logging.INFO, logger="simpler")
     instrument_wrappers(monkeypatch, backend=backend)
     x = torch.arange(2 * N, dtype=torch.float32).reshape(2, 1, N).share_memory_()
     y = torch.zeros_like(x).share_memory_()
     stats = torch.zeros((2, 1, 8), dtype=torch.int32).share_memory_()
     fault = int(mode == "transient")
     dc = DistributedConfig(device_ids=device_ids, num_sub_workers=0, aicpu_thread_num=2)
-    compiled = ir.compile(
-        build_program(), platform="a5", output_dir=str(tmp_path / "program"), distributed_config=dc
-    )
+    if backend == "urma":
+        compiled = urma_program.compile(
+            x,
+            y,
+            stats,
+            fault,
+            config=RunConfig(
+                platform="a5", save_kernels_dir=str(tmp_path / "program"), distributed_config=dc
+            ),
+        )
+    else:
+        compiled = ir.compile(
+            build_program(), platform="a5", output_dir=str(tmp_path / "program"), distributed_config=dc
+        )
     with compiled.prepare(operator_recovery=OperatorRecoveryConfig()) as runtime:
         callables = runtime._states[compiled]["chip_cids"]
         programs = {handle.digest.hex(): name for name, handle in callables.items()}
         runtime(x, y, stats, fault, config=RunConfig(platform="a5", enable_chip_swimlane=1))
     torch.testing.assert_close(y, x.flip(0) + 4, rtol=0, atol=0)
+    dfx = _run_directory(compiled) / "dfx_outputs"
     captured = capfd.readouterr()
-    logs = captured.out + captured.err
+    # Child native logs move to this directory on the first DFX dispatch.
+    # Worker teardown has drained the writers; initialization stays on stderr.
+    logs = "\n".join(
+        [captured.out, captured.err, *(path.read_text() for path in sorted(dfx.glob("host.*.log")))]
+    )
     with capfd.disabled():
         print(logs, end="", flush=True)
     dispatches = len(re.findall(r"\[PTO_RECOVERY\] REPLAY_DISPATCH ", logs))
@@ -538,7 +554,25 @@ def test_recovery_dfx_labels(test_config, device_ids, mode, capfd, monkeypatch, 
     assert "No L2 program recorded" not in logs
     assert "Skipping L3 swimlane name_map" not in logs
     assert "Skipping L3 swimlane conversion" not in logs
-    dfx = _run_directory(compiled) / "dfx_outputs"
+    if backend == "urma":
+        created = re.findall(
+            r"URMA_DOMAIN_OWNER_CREATE_RESULT rank=(\d+) allocation_id=(\d+) "
+            r"base_hccl=(0x[0-9a-f]+) domain_hccl=(0x[0-9a-f]+) rc=0\b",
+            logs,
+        )
+        destroyed = re.findall(
+            r"URMA_DOMAIN_OWNER_DESTROY_RESULT rank=(\d+) allocation_id=(\d+) "
+            r"domain_hccl=(0x[0-9a-f]+) rc=0\b",
+            logs,
+        )
+        assert len(created) == len(destroyed) == 4, (created, destroyed)
+        assert all(base != domain for _, _, base, domain in created)
+        assert {(rank, allocation, domain) for rank, allocation, _, domain in created} == set(destroyed)
+        for rank in ("0", "1"):
+            owners = [allocation for owner_rank, allocation, _, _ in created if owner_rank == rank]
+            assert len(set(owners)) == 2, owners
+        assert "HcclCommMemReg failed" not in logs and "HcclCommMemReg(notifyPool) failed" not in logs
+        assert "already registered" not in logs
     captures = []
     for rank in range(2):
         rank_programs = set()
